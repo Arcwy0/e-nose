@@ -1,0 +1,70 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "enose"
+version = "3.1.0"
+description = "Vision + smell multimodal understanding for a Unitree Go-1 e-nose rig"
+readme = { text = "E-Nose: Florence-2 vision + 22-feature smell classifier (FastAPI server + interactive client).", content-type = "text/plain" }
+requires-python = ">=3.9"
+authors = [{ name = "Sense" }]
+license = { text = "MIT" }
+
+# Heavy deps (torch, transformers, imbalanced-learn, xgboost) live in the Docker image,
+# not here — so the package can be installed on the host without a CUDA toolchain.
+dependencies = [
+    "fastapi>=0.110,<0.120",
+    "uvicorn[standard]>=0.29",
+    "pydantic>=2.5",
+    "python-multipart>=0.0.9",
+    # numpy<2 — xgboost 2.1 / imbalanced-learn 0.12 use numpy-1 ABIs
+    "numpy>=1.24,<2.0",
+    "pandas>=2.0,<3.0",
+    # scikit-learn<1.6 — imbalanced-learn 0.12 imports the private symbol
+    # sklearn.utils._tags._safe_tags which was removed in 1.6.
+    "scikit-learn>=1.3,<1.6",
+    "joblib>=1.3",
+    "matplotlib>=3.7",
+    "pillow>=10.0",
+    "requests>=2.31",
+    "pyserial>=3.5",
+    "opencv-python>=4.8",
+]
+
+[project.optional-dependencies]
+vision = [
+    "torch>=2.1",
+    # Florence-2's bundled configuration_florence2.py references
+    # `forced_bos_token_id`, which was removed from PretrainedConfig in
+    # transformers ≥ 4.50. Cap below that until Microsoft updates the model.
+    "transformers>=4.40,<4.50",
+    "einops>=0.7",
+    "timm>=0.9",
+]
+classifier-extras = [
+    # Pinned: 0.13+ changed private API paths in ways the classifier code
+    # isn't tested against; 0.12.4 is the reference version.
+    "imbalanced-learn==0.12.4",
+    "xgboost>=2.0,<2.2",
+]
+dev = [
+    "pytest>=8.0",
+    "ruff>=0.4",
+]
+
+[project.scripts]
+enose-server = "enose.server.app:app"
+enose-client = "enose.client.main:main"
+
+[tool.setuptools.packages.find]
+include = ["enose*"]
+exclude = ["tests*", "scripts*"]
+
+[tool.ruff]
+line-length = 110
+target-version = "py39"
+
+[tool.ruff.lint]
+extend-select = ["I", "UP", "B", "SIM"]
+ignore = ["E501"]

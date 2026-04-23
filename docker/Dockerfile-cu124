@@ -1,0 +1,140 @@
+# syntax=docker/dockerfile:1.6
+#
+# enose-server — purpose-built image for the FastAPI server
+#   • Florence-2 VLM (inference only)
+#   • BalancedRF / XGBoost smell classifier
+#
+# Design notes:
+#   - Everything Florence-2-Large does NOT need has been removed: no vLLM,
+#     no flash-attn, no gradio, no deepspeed, no mistral-common, no dashscope.
+#     Those dragged in transformers>=4.56 / torch==X.Y constraints that
+#     conflict with Florence-2's custom configuration_florence2.py.
+#   - transformers is pinned at 4.44.2 — the last release where Florence-2
+#     loads cleanly without patching Microsoft's remote code.
+#   - Project source is NOT copied in; it is bind-mounted at runtime via
+#     `-v "$(pwd)":/app`. `PYTHONPATH=/app` makes `import enose` work.
+#     This keeps rebuilds snappy — edits to Python files do not invalidate
+#     any Docker layer.
+#
+# Build:
+#   docker build -t enose-server -f docker/Dockerfile-cu124 .
+#
+# Run (full mode, VLM + classifier):
+#   docker run -it --name florence2 --gpus '"device=0"' \
+#       --network enose-net -p 8016:8080 \
+#       -v "$(pwd)":/app -e PYTHONPATH=/app \
+#       --env-file .env enose-server \
+#       python scripts/run_server.py
+#
+# Run (smell-only, skip VLM load — same image, no GPU needed):
+#   docker run -it --name enose-smell --network enose-net \
+#       -p 8016:8080 -v "$(pwd)":/app \
+#       -e PYTHONPATH=/app -e ENOSE_NO_VLM=1 -e ENOSE_CLASSIFIER=xgb \
+#       enose-server python scripts/run_server.py
+
+ARG CUDA_VERSION=12.4.1
+# We need the -devel base (not -runtime) because flash-attn compiles CUDA
+# kernels from source during install — that needs nvcc and the full CUDA
+# toolchain. Adds ~2 GB to the image but there is no supported way to run
+# Florence-2-Large without flash_attn: its modeling_florence2.py imports it
+# at module top, before `attn_implementation="eager"` could take effect.
+FROM nvidia/cuda:${CUDA_VERSION}-cudnn-devel-ubuntu22.04 AS base
+
+ARG DEBIAN_FRONTEND=noninteractive
+
+# ── System packages ──────────────────────────────────────────────────────────
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        git \
+        git-lfs \
+        python3 \
+        python3-pip \
+        python3-dev \
+        wget \
+        ca-certificates \
+        libgl1 \
+        libglib2.0-0 \
+        libsm6 \
+        libxext6 \
+        libxrender1 \
+    && rm -rf /var/lib/apt/lists/* \
+    && ln -sf /usr/bin/python3 /usr/bin/python \
+    && git lfs install
+
+ENV CUDA_HOME=/usr/local/cuda
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV PYTHONUNBUFFERED=1
+ENV PIP_NO_CACHE_DIR=1
+ENV PIP_DISABLE_PIP_VERSION_CHECK=1
+ENV MPLBACKEND=Agg
+ENV PYTHONPATH=/app
+
+WORKDIR /app
+
+# ── PyTorch (CUDA 12.4 wheels, matches the base image) ───────────────────────
+# Pinned so we don't silently drift onto a release that breaks Florence-2.
+RUN pip3 install --upgrade pip \
+    && pip3 install \
+        torch==2.4.1 \
+        torchvision==0.19.1 \
+        --index-url https://download.pytorch.org/whl/cu124
+
+# ── Vision stack — pinned for Florence-2-Large compatibility ─────────────────
+# Florence-2's bundled configuration_florence2.py references
+# `forced_bos_token_id`, which transformers >=4.50 no longer exposes.
+RUN pip3 install \
+        "transformers==4.44.2" \
+        "accelerate>=0.33,<1.0" \
+        "einops>=0.7,<1.0" \
+        "timm>=0.9,<1.1" \
+        "huggingface_hub>=0.24,<1.0" \
+        "safetensors>=0.4,<1.0" \
+        "sentencepiece>=0.2"
+
+# ── Flash-Attention (required by Florence-2-Large) ──────────────────────────
+# modeling_florence2.py imports flash_attn at module top; transformers'
+# check_imports scans the file before any fallback flag can apply, so the
+# package MUST be importable even if the model wouldn't use it at inference.
+#
+# Version 2.7.3 is the reference version that matches torch 2.4 + cu12.4.
+# --no-build-isolation lets setup.py see the already-installed torch.
+# MAX_JOBS caps parallel nvcc processes so 16 GB containers don't OOM.
+ENV MAX_JOBS=4
+RUN pip3 install "packaging>=23" "ninja>=1.11" "wheel" \
+    && pip3 install --no-build-isolation "flash-attn==2.7.3"
+
+# ── E-nose server + classifier runtime deps ─────────────────────────────────
+# Kept in sync with pyproject.toml (base + [classifier-extras]).
+#
+# Version-lock notes:
+#   * numpy<2.0        — xgboost 2.1 and imbalanced-learn 0.12 wheels ship
+#                        numpy-1 ABIs; mixing with numpy 2 causes runtime
+#                        "module compiled against NumPy API version 0x10"
+#                        errors.
+#   * scikit-learn<1.6 — imbalanced-learn 0.12 / 0.13 import the private
+#                        symbol `sklearn.utils._tags._safe_tags`, which was
+#                        removed in scikit-learn 1.6. Pinning <1.6 keeps
+#                        that import path intact.
+#   * imbalanced-learn  pinned to 0.12.4 — the last release whose API the
+#                        e-nose classifier was tested against.
+RUN pip3 install \
+        "numpy>=1.24,<2.0" \
+        "pandas>=2.0,<3.0" \
+        "scipy>=1.10,<1.14" \
+        "scikit-learn>=1.3,<1.6" \
+        "imbalanced-learn==0.12.4" \
+        "xgboost>=2.0,<2.2" \
+        "joblib>=1.3" \
+        "matplotlib>=3.7" \
+        "pillow>=10.0" \
+        "requests>=2.31" \
+        "pyserial>=3.5" \
+        "opencv-python-headless>=4.8" \
+        "fastapi>=0.110,<0.120" \
+        "uvicorn[standard]>=0.29" \
+        "pydantic>=2.5" \
+        "python-multipart>=0.0.9"
+
+EXPOSE 8080
+
+CMD ["/bin/bash"]

@@ -1,0 +1,44 @@
+docker build -f docker/Dockerfile-cu121 -t florence-container .
+docker build -f docker/Dockerfile-cu124 -t florence2-container .
+
+tuna tcp 8016 --port=enose
+
+##########1
+docker run -it --name florence2 --gpus '"device=0"' -p 8016:8080 \
+  -v /home/vlm-workspace/e-nose:/app \
+  florence2-container
+docker run -it --name florence2 --gpus '"device=0"' -p 8016:8080 -v /home/vlm-workspace/e-nose
+python3 smell_classifier_1606.py --data enose_points_1906.csv --augment --n_aug 0 --save trained_models/smell_classifier_sgd_latest.joblib
+
+docker stop qwen2vl
+docker rm qwen2vl
+
+docker run -it florence -p 8016:8080 -v /media/imit-learn/ISR_2T1/VR_October/Florence-2-large:/app --gpus all --rm --name florence florence-container bash
+
+pip install datasets==2.21.0
+llamafactory-cli train examples/train_qlora/llama3_lora_sft_gptq.yaml 
+pip install multiprocess==0.70.10
+cp -R llamafactory /usr/local/lib/python3.8/dist-packages
+cp -R llamafactory.egg-info/ /usr/local/lib/python3.8/dist-packages/CUDA_VERSION=cu121
+
+
+cp llamafactory/data/mm_plugin.py /usr/local/lib/python3.8/dist-packages/llamafactory/data/
+
+docker run -it --name florence2 \
+    --gpus '"device=0"' \
+    --network enose-net \
+    -p 8016:8080 \
+    -v /home/vlm-workspace/e-nose:/app \
+    -e PYTHONPATH=/app \
+    enose-server
+
+  ENOSE_NO_VLM=1 python scripts/run_server.py
+
+  python -m enose.utils.segment_aggregate \
+  --in data/database_robodog_time.csv \
+  --out data/database_robodog_time_windows.csv \
+  --mode summary \
+  --window-seconds 120 \
+  --stride-seconds 60 \
+  --skip-head-seconds 60 \
+  --skip-tail-seconds 30

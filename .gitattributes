@@ -1,0 +1,56 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# enose — .gitattributes
+#
+# Most large artifacts are gitignored outright. These patterns exist as a
+# safety net: if somebody force-adds a model weight or a recorded session,
+# Git LFS handles it rather than bloating the pack file. Install LFS once:
+#
+#     git lfs install
+#
+# before cloning or committing. CI and CPython-only environments don't need
+# LFS — the LFS-tracked content is optional by design.
+# ─────────────────────────────────────────────────────────────────────────────
+
+# ── Model weights ────────────────────────────────────────────────────────────
+*.safetensors filter=lfs diff=lfs merge=lfs -text
+*.bin         filter=lfs diff=lfs merge=lfs -text
+*.pt          filter=lfs diff=lfs merge=lfs -text
+*.pth         filter=lfs diff=lfs merge=lfs -text
+*.onnx        filter=lfs diff=lfs merge=lfs -text
+*.ckpt        filter=lfs diff=lfs merge=lfs -text
+*.gguf        filter=lfs diff=lfs merge=lfs -text
+*.msgpack     filter=lfs diff=lfs merge=lfs -text
+*.h5          filter=lfs diff=lfs merge=lfs -text
+*.tflite      filter=lfs diff=lfs merge=lfs -text
+
+# ── Classifier artifacts ─────────────────────────────────────────────────────
+*.joblib      filter=lfs diff=lfs merge=lfs -text
+*.pkl         filter=lfs diff=lfs merge=lfs -text
+*.pickle      filter=lfs diff=lfs merge=lfs -text
+
+# ── Recorded sessions ────────────────────────────────────────────────────────
+*.npz         filter=lfs diff=lfs merge=lfs -text
+*.npy         filter=lfs diff=lfs merge=lfs -text
+
+# ── Large media (if ever added to docs/) ─────────────────────────────────────
+*.mp4         filter=lfs diff=lfs merge=lfs -text
+*.mov         filter=lfs diff=lfs merge=lfs -text
+*.gif         filter=lfs diff=lfs merge=lfs -text
+
+# ── Line-ending normalisation ────────────────────────────────────────────────
+# Keep shell scripts LF so they work inside the Linux Docker images.
+*.sh  text eol=lf
+*.py  text
+*.md  text
+*.yml text
+*.yaml text
+*.toml text
+*.json text
+*.csv text
+
+# Windows batch files stay CRLF
+*.bat text eol=crlf
+*.ps1 text eol=crlf
+
+# Everything else: let git auto-detect
+* text=auto

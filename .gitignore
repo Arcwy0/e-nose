@@ -1,0 +1,136 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# enose — .gitignore
+#
+# Philosophy: keep the repo to source + tiny example data only. Anything big,
+# local, secret, or regeneratable stays out. Large artifacts that someone
+# genuinely wants to track should go through Git LFS (see .gitattributes).
+# ─────────────────────────────────────────────────────────────────────────────
+
+# ── Python ───────────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# Build / packaging
+build/
+dist/
+*.egg
+*.egg-info/
+.eggs/
+wheels/
+pip-wheel-metadata/
+MANIFEST
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+.python-version
+
+# Testing / coverage
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.nox/
+coverage.xml
+*.cover
+
+# Type checkers / linters
+.mypy_cache/
+.ruff_cache/
+.pyre/
+.pytype/
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb_checkpoints
+
+# ── IDEs / editors ───────────────────────────────────────────────────────────
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.cursor/
+.aider*
+
+# ── Claude / agent local state (user-specific, never commit) ─────────────────
+.claude/
+CLAUDE.local.md
+.aider.chat.history.md
+.aider.input.history
+
+# ── OS noise ─────────────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+
+# ── Secrets / environment ────────────────────────────────────────────────────
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+secrets/
+credentials.json
+
+# ── Model weights (download via docs/SETUP.md, do NOT commit) ────────────────
+# Florence-2-Large alone is ~1.6 GB; keep the folder but skip its contents.
+model/*
+!model/.gitkeep
+!model/README.md
+
+# HuggingFace cache accidentally placed in-tree
+hf_cache/
+.hf_cache/
+
+# Generic ML weight formats — opt-in via git add -f if you really want them.
+# (They will still route through LFS thanks to .gitattributes.)
+*.safetensors
+*.bin
+*.pt
+*.pth
+*.onnx
+*.ckpt
+*.gguf
+
+# ── Trained classifier artifacts (regenerated at runtime) ────────────────────
+trained_models/*
+!trained_models/.gitkeep
+!trained_models/README.md
+*.joblib
+*.pkl
+*.pickle
+
+# ── Recorded sessions from --record-session ─────────────────────────────────
+runs/
+*.npz
+
+# ── Generated plots and data logs ────────────────────────────────────────────
+plots/
+data/plots/
+data/*.csv
+!data/enose_points_1906.csv          # small reference sample kept in-tree
+!data/README.md
+!data/.gitkeep
+database_robodog*.csv                # root-level auto-generated training log
+temp_capture.png
+*.log
+
+# ── Docker / containers ──────────────────────────────────────────────────────
+# (Dockerfiles ARE committed — these are build byproducts)
+.docker/
+docker-compose.override.yml
+
+# ── Misc ─────────────────────────────────────────────────────────────────────
+*.bak
+*.tmp
+*.old
+.cache/
