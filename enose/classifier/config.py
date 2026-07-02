@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass, field
 from typing import Dict, Optional, Tuple
 
@@ -42,6 +43,25 @@ class SmellClassifierConfig:
     # Feature shaping
     use_log1p: bool = True          # log1p on R1-R17 before scaling
     scaler_kind: str = "robust"     # "robust" (RobustScaler) or "standard" (StandardScaler)
+
+    # ── Drift-invariant feature representation (OPT-IN) ──────────────────────
+    # Additive: the defaults below reproduce the original absolute pipeline
+    # exactly. Turn them on to make predictions robust to day-to-day MOS sensor
+    # drift by classifying each sample RELATIVE to a fresh clean-air baseline
+    # (captured per session) instead of absolute resistances.
+    #
+    # baseline_mode:
+    #   "none"     — original absolute features (default; nothing changes)
+    #   "delta"    — R − R0                 (skips the standalone log1p step)
+    #   "ratio"    — R / R0
+    #   "logratio" — log1p(R) − log1p(R0)   (subsumes log1p; most drift-robust)
+    baseline_mode: str = "none"
+    # snv: per-sample Standard Normal Variate across R1-R17 (pattern normalization).
+    snv: bool = False
+    # EMA smoothing when updating the live baseline from clean-air readings.
+    baseline_ema_alpha: float = 0.3
+    # Label treated as the clean-air reference when deriving baselines from data.
+    air_label: str = "air"
 
     # Feature selection. When False, T/H/CO2/H2S/CH2O are excluded from the
     # model's input. They still pass through the preprocessing pipeline (so
@@ -88,3 +108,18 @@ class SmellClassifierConfig:
 
     # Plotting
     figure_dpi: int = 140
+
+    def __post_init__(self) -> None:
+        """Allow per-run opt-in to drift-robust features via env vars, without
+        editing code or config. A model loaded from disk overrides these again
+        from its saved payload, so a trained model's own mode always wins.
+
+            ENOSE_BASELINE_MODE = none|delta|ratio|logratio
+            ENOSE_SNV           = 1/true/yes to enable SNV
+        """
+        env_mode = os.environ.get("ENOSE_BASELINE_MODE")
+        if env_mode:
+            self.baseline_mode = env_mode.strip().lower()
+        env_snv = os.environ.get("ENOSE_SNV")
+        if env_snv is not None:
+            self.snv = env_snv.strip().lower() in ("1", "true", "yes", "on")

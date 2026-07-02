@@ -61,6 +61,15 @@ def build_save_payload(classifier) -> Dict[str, Any]:
         # from disk (which does not restore last_training_data).
         "class_distribution_": dict(getattr(classifier, "class_distribution_", {}) or {}),
         "class_examples_": dict(getattr(classifier, "class_examples_", {}) or {}),
+        # Drift-invariant representation: the feature mode + the clean-air
+        # baseline used to compute relative features. Absent on legacy payloads
+        # → restored as absolute mode (baseline_mode="none"), unchanged behavior.
+        "baseline_mode": str(getattr(classifier.config, "baseline_mode", "none")),
+        "snv": bool(getattr(classifier.config, "snv", False)),
+        "air_label": str(getattr(classifier.config, "air_label", "air")),
+        "baseline_ema_alpha": float(getattr(classifier.config, "baseline_ema_alpha", 0.3)),
+        "sensor_baseline_": dict(getattr(classifier, "sensor_baseline_", {}) or {}),
+        "_original_baseline_": dict(getattr(classifier, "_original_baseline_", {}) or {}),
     }
 
 
@@ -199,4 +208,13 @@ def load(path: str, cls) -> "cls":
     # the built-in "Try" examples and an empty distribution until a retrain).
     obj.class_distribution_ = dict(payload.get("class_distribution_", {}) or {})
     obj.class_examples_ = dict(payload.get("class_examples_", {}) or {})
+
+    # Drift-invariant representation — defaults reproduce the absolute pipeline,
+    # so legacy models (no keys) keep predicting exactly as before.
+    obj.config.baseline_mode = str(payload.get("baseline_mode", "none"))
+    obj.config.snv = bool(payload.get("snv", False))
+    obj.config.air_label = str(payload.get("air_label", "air"))
+    obj.config.baseline_ema_alpha = float(payload.get("baseline_ema_alpha", 0.3))
+    obj.sensor_baseline_ = dict(payload.get("sensor_baseline_", {}) or {})
+    obj._original_baseline_ = dict(payload.get("_original_baseline_", {}) or {})
     return obj

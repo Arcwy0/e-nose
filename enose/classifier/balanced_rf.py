@@ -88,6 +88,13 @@ class BalancedRFClassifier(SmellClassifierBase):
         self.class_distribution_: Dict[str, int] = {}
         self.class_examples_: Dict[str, List[float]] = {}
 
+        # Drift-invariant representation state (opt-in; empty in absolute mode).
+        # sensor_baseline_ = the ACTIVE clean-air baseline used for baseline-relative
+        # features (updated per session at inference via /smell/baseline);
+        # _original_baseline_ = the training-time fallback. Both map R1-R17 → R0.
+        self.sensor_baseline_: Dict[str, float] = {}
+        self._original_baseline_: Dict[str, float] = {}
+
     # ── model construction ──────────────────────────────────────────────────
     def _build_model(self, y_fit=None):
         base = BalancedRandomForestClassifier(
@@ -190,22 +197,75 @@ class BalancedRFClassifier(SmellClassifierBase):
             return CalibratedClassifierCV(base_estimator=base_clf, method=method, cv=cv)
 
     # ── preprocessing wrapper used by server ────────────────────────────────
+    @staticmethod
+    def _mean_baselines(per_group: Dict[str, Dict[str, float]]) -> Dict[str, float]:
+        """Average per-group clean-air baselines into one fallback baseline."""
+        acc: Dict[str, List[float]] = {}
+        for b in (per_group or {}).values():
+            for k, v in (b or {}).items():
+                acc.setdefault(k, []).append(float(v))
+        return {k: float(np.mean(vs)) for k, vs in acc.items() if vs}
+
+    def _effective_baseline_mode(self) -> str:
+        """Configured baseline_mode, but 'none' when no baseline is available —
+        so we never emit half-relative features."""
+        mode = getattr(self.config, "baseline_mode", "none") or "none"
+        if mode == "none":
+            return "none"
+        return mode if self.sensor_baseline_ else "none"
+
     def process_sensor_data(self, X) -> pd.DataFrame:
         """Sanitize env, fill missing cols, clean resistances (raw-space bounds),
-        optional log1p, then scale if fitted.
+        optional baseline-relative + log1p + SNV, then scale if fitted.
 
         This is the *inference* path. It must mirror the training path in
-        `train()` step-for-step; see that method for the full pipeline.
+        `train()` step-for-step; see that method for the full pipeline. The
+        baseline-relative / SNV steps are no-ops unless the model was trained
+        with those options (absolute path stays identical).
         """
         df = preprocessing.ensure_dataframe(X)
         df = preprocessing.sanitize_environmentals(df, self.config.env_ranges, self.config.env_medians)
         df = preprocessing.order_and_fill_features(df, self.config.env_medians)
         df = preprocessing.clean_resistances(df, self.r_median_, self.r_clip_)
+        mode = self._effective_baseline_mode()
+        if mode != "none":
+            df = preprocessing.baseline_relative_resistances(df, self.sensor_baseline_, mode)
+        # log1p decision was baked into _log1p_applied at train (skips for delta/logratio).
         if getattr(self.config, "use_log1p", False) and getattr(self, "_log1p_applied", True):
             df = preprocessing.log1p_resistances(df)
+        if getattr(self.config, "snv", False):
+            df = preprocessing.snv_normalize(df)
         if self.is_fitted and self._use_internal_scaler and self._scaler_is_fitted():
             df = preprocessing.scale_resistances(df, self.scaler_r, fit=False)
         return df
+
+    def update_baseline(self, air_samples, ema: bool = True) -> Dict[str, float]:
+        """Set/refresh the ACTIVE clean-air baseline from same-session air readings.
+
+        ``air_samples`` is anything accepted by ``process_sensor_data`` input
+        (dict, list-of-dicts, DataFrame). Only meaningful when the model was
+        trained with a baseline_mode; otherwise it's stored but unused. Returns
+        the new active baseline. EMA-smoothed against the existing baseline
+        (like the XGB path) unless ``ema=False``.
+        """
+        df = preprocessing.ensure_dataframe(air_samples)
+        df = preprocessing.sanitize_environmentals(df, self.config.env_ranges, self.config.env_medians)
+        df = preprocessing.order_and_fill_features(df, self.config.env_medians)
+        df = preprocessing.clean_resistances(df, self.r_median_, self.r_clip_)
+        new = preprocessing.compute_air_baseline(df, label_col="__none__")  # treat all rows as air
+        if not new:
+            return dict(self.sensor_baseline_)
+        alpha = float(getattr(self.config, "baseline_ema_alpha", 0.3))
+        if ema and self.sensor_baseline_:
+            merged = {}
+            for k in set(self.sensor_baseline_) | set(new):
+                old = float(self.sensor_baseline_.get(k, new.get(k, 0.0)))
+                cur = float(new.get(k, old))
+                merged[k] = alpha * cur + (1.0 - alpha) * old
+            self.sensor_baseline_ = merged
+        else:
+            self.sensor_baseline_ = dict(new)
+        return dict(self.sensor_baseline_)
 
     def _scaler_is_fitted(self) -> bool:
         """RobustScaler exposes ``center_``, StandardScaler exposes ``mean_``."""
@@ -277,10 +337,50 @@ class BalancedRFClassifier(SmellClassifierBase):
         self.r_clip_, self.r_median_ = preprocessing.compute_resistance_clip_bounds(
             X_df, ignore_zeros=True
         )
+        # In drift-robust modes the raw winsorize would clip away the day-to-day
+        # magnitude shift that baseline-referencing is meant to cancel (a drifted
+        # session's resistances legitimately fall outside this session's p1–p99).
+        # Disable the raw upper/lower clip and rely on RobustScaler for outliers;
+        # keep the per-sensor median for zero/NaN fill of dead channels.
+        if (getattr(self.config, "baseline_mode", "none") or "none") != "none":
+            self.r_clip_ = {c: (-np.inf, np.inf) for c in self.RESISTANCE_SENSORS}
         X_df = preprocessing.clean_resistances(X_df, self.r_median_, self.r_clip_)
-        if self.config.use_log1p:
+
+        # ── Drift-invariant representation (opt-in; no-op when baseline_mode='none') ──
+        # Reference each training GROUP (session/recording) to its OWN clean-air
+        # baseline so multi-session data becomes comparable before pooling. Store a
+        # representative baseline as the inference-time fallback.
+        mode = getattr(self.config, "baseline_mode", "none") or "none"
+        if mode != "none":
+            grp = (
+                pd.Series(list(groups), index=X_df.index).astype(str)
+                if groups is not None
+                else pd.Series("all", index=X_df.index)
+            )
+            tmp = X_df.copy()
+            tmp[self._label_col] = y_series.values
+            tmp, per_group_baselines = preprocessing.apply_baseline_relative_per_group(
+                tmp, grp, mode, air_label=getattr(self.config, "air_label", "air"),
+                label_col=self._label_col,
+            )
+            X_df = tmp[list(self.ALL_SENSORS)]
+            self._original_baseline_ = self._mean_baselines(per_group_baselines)
+            self.sensor_baseline_ = dict(self._original_baseline_)
+            if not self.sensor_baseline_:
+                print(
+                    "[train] baseline_mode set but no clean-air rows found — "
+                    "falling back to absolute features"
+                )
+                mode = "none"  # effective mode: nothing was subtracted
+
+        # log1p: 'delta'/'logratio' skip the standalone log (negatives / already logged).
+        apply_log = bool(self.config.use_log1p) and mode not in ("delta", "logratio")
+        if apply_log:
             X_df = preprocessing.log1p_resistances(X_df)
-        self._log1p_applied = bool(self.config.use_log1p)
+        self._log1p_applied = apply_log
+
+        if getattr(self.config, "snv", False):
+            X_df = preprocessing.snv_normalize(X_df)
 
         # Train/test split: group-aware when possible, else dedup + stratified.
         X_train, X_test, y_train, y_test = self._split(

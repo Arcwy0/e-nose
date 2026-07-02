@@ -156,6 +156,116 @@ def augment_resistances(
     return pd.concat(X_aug, ignore_index=True)
 
 
+# ── Drift-invariant feature representation (opt-in) ──────────────────────────
+# These transforms are additive: they are only invoked when the classifier is
+# configured with baseline_mode != "none" / snv=True. With the defaults off,
+# none of these run and the pipeline is byte-identical to the absolute one.
+
+def compute_air_baseline(
+    df: pd.DataFrame,
+    air_label: str = "air",
+    label_col: str = "smell_label",
+) -> Dict[str, float]:
+    """Per-sensor clean-air baseline R0 (mean resistance of the air rows).
+
+    Falls back to all rows when no air rows / label column are present. Zero
+    channels are ignored (like clip-bound computation) so a dead sensor does
+    not drag the baseline to 0.
+    """
+    cols = [c for c in RESISTANCE_SENSORS if c in df.columns]
+    if not cols:
+        return {}
+    sub = df
+    if label_col in df.columns:
+        mask = df[label_col].astype(str).str.lower().eq(str(air_label).lower())
+        if mask.any():
+            sub = df.loc[mask]
+    R = sub[cols].astype(float)
+    R = R.where(R > 0.0)
+    out: Dict[str, float] = {}
+    for c in cols:
+        m = R[c].mean()
+        out[c] = float(m) if pd.notna(m) else 0.0
+    return out
+
+
+def baseline_relative_resistances(
+    df: pd.DataFrame,
+    baseline: Dict[str, float],
+    mode: str,
+) -> pd.DataFrame:
+    """Reference R1–R17 to a clean-air baseline R0 to cancel day-to-day drift.
+
+    ``mode``: ``delta`` → R−R0, ``ratio`` → R/R0, ``logratio`` → log1p(R)−log1p(R0).
+    Because the target smell and the air baseline drift together, the relative
+    response is stable across days. Env columns are untouched. Returns ``df``
+    unchanged when ``mode`` is ``none``/None or ``baseline`` is empty, so the
+    absolute path is preserved exactly.
+    """
+    if mode in (None, "none") or not baseline:
+        return df
+    df = df.copy()
+    for c in RESISTANCE_SENSORS:
+        if c not in df.columns:
+            continue
+        r0 = float(baseline.get(c, 0.0))
+        r = pd.to_numeric(df[c], errors="coerce").astype(float)
+        if mode == "delta":
+            df[c] = r - r0
+        elif mode == "ratio":
+            denom = r0 if abs(r0) > 1e-9 else 1e-9
+            df[c] = r / denom
+        elif mode == "logratio":
+            df[c] = np.log1p(r.clip(lower=0.0)) - np.log1p(max(r0, 0.0))
+        else:
+            raise ValueError(f"unknown baseline_mode: {mode!r}")
+    return df
+
+
+def snv_normalize(df: pd.DataFrame) -> pd.DataFrame:
+    """Per-sample Standard Normal Variate across R1–R17: (R − row_mean) / row_std.
+
+    Removes overall intensity/gain differences so the odour *pattern* (the shape
+    of the response across sensors) is what the model classifies. Env untouched;
+    constant rows are handled safely (std → tiny epsilon).
+    """
+    df = df.copy()
+    cols = [c for c in RESISTANCE_SENSORS if c in df.columns]
+    if not cols:
+        return df
+    R = df[cols].astype(float)
+    mu = R.mean(axis=1)
+    sd = R.std(axis=1, ddof=0).replace(0.0, 1e-9)
+    df[cols] = R.sub(mu, axis=0).div(sd, axis=0)
+    return df
+
+
+def apply_baseline_relative_per_group(
+    df: pd.DataFrame,
+    groups: pd.Series,
+    mode: str,
+    air_label: str = "air",
+    label_col: str = "smell_label",
+) -> Tuple[pd.DataFrame, Dict[str, Dict[str, float]]]:
+    """Reference each group's rows to THAT group's own clean-air baseline.
+
+    This is what makes multi-session training data comparable: every session is
+    expressed relative to its own air, cancelling per-session drift before the
+    rows are pooled for training. Returns (transformed_df, {group: baseline}).
+    """
+    if mode in (None, "none"):
+        return df.copy(), {}
+    out = df.copy()
+    baselines: Dict[str, Dict[str, float]] = {}
+    g = pd.Series(list(groups), index=df.index).astype(str)
+    for gid, idx in g.groupby(g).groups.items():
+        block = df.loc[idx]
+        b = compute_air_baseline(block, air_label=air_label, label_col=label_col)
+        baselines[str(gid)] = b
+        out.loc[idx, :] = baseline_relative_resistances(block, b, mode)
+    return out, baselines
+
+
 def compute_resistance_clip_bounds(
     X: pd.DataFrame,
     ignore_zeros: bool = True,
