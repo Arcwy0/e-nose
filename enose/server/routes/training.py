@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import base64
+import datetime
 import json
 import os
 import tempfile
 import traceback
+import uuid
 from io import StringIO
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 import pandas as pd
 from fastapi import APIRouter, File, Form, HTTPException, UploadFile
@@ -25,9 +28,57 @@ from enose.vision.florence import process_image_with_vlm
 
 from .. import state
 from ..model_loader import reload_smell_classifier, save_training_data
-from ..schemas import CSVLearningData, OnlineLearningData
+from ..schemas import CommitProvenance, CSVLearningData, OnlineLearningData
 
 router = APIRouter()
+
+
+PROVENANCE_DIR = os.path.join(DATA_DIR, "provenance")
+
+
+def _persist_provenance(
+    provenance: CommitProvenance,
+    labels: list[str],
+    n_samples: int,
+) -> Optional[Dict[str, Any]]:
+    """Persist a commit's provenance to ``data/provenance/<id>.{json,png}``.
+
+    Returns the saved metadata (with ``provenance_id`` + ``image_path``) on
+    success, ``None`` on failure (never raises — provenance is best-effort).
+    """
+    try:
+        os.makedirs(PROVENANCE_DIR, exist_ok=True)
+        pid = datetime.datetime.now().strftime("%Y%m%d-%H%M%S-") + uuid.uuid4().hex[:8]
+        image_path: Optional[str] = None
+        if provenance.image_b64:
+            try:
+                img_bytes = base64.b64decode(provenance.image_b64)
+                ext = os.path.splitext(provenance.image_filename or "img.png")[1] or ".png"
+                image_path = os.path.join(PROVENANCE_DIR, f"{pid}{ext}")
+                with open(image_path, "wb") as f:
+                    f.write(img_bytes)
+            except Exception as e:  # pragma: no cover — defensive
+                print(f"[provenance] image decode failed: {e}")
+                image_path = None
+        meta = {
+            "provenance_id": pid,
+            "saved_at": datetime.datetime.now().isoformat(timespec="seconds"),
+            "label": labels[0] if labels else None,
+            "n_samples": n_samples,
+            "grounding_score": float(provenance.grounding_score),
+            "bbox": provenance.bbox,
+            "pose": provenance.pose,
+            "session_id": provenance.session_id,
+            "detector_task": provenance.detector_task,
+            "image_path": image_path,
+            "extras": provenance.extras or {},
+        }
+        with open(os.path.join(PROVENANCE_DIR, f"{pid}.json"), "w") as f:
+            json.dump(meta, f, indent=2, sort_keys=True)
+        return meta
+    except Exception as e:  # pragma: no cover — defensive
+        print(f"[provenance] persist failed: {e}")
+        return None
 
 
 def _detect_new_classes_or_mismatch(clf, incoming_classes) -> tuple[set, bool]:
@@ -61,6 +112,15 @@ async def online_learning(data: OnlineLearningData) -> Dict[str, Any]:
 
     print(f"[online_learning] {len(data.sensor_data)} samples; labels={sorted(set(data.labels))}")
 
+    provenance_meta: Optional[Dict[str, Any]] = None
+    if data.provenance is not None:
+        provenance_meta = _persist_provenance(data.provenance, data.labels, len(data.sensor_data))
+        if provenance_meta:
+            print(
+                f"[online_learning] provenance saved id={provenance_meta['provenance_id']} "
+                f"score={provenance_meta['grounding_score']:.3f}"
+            )
+
     try:
         save_training_data(data.sensor_data, data.labels)
         df = clf.process_sensor_data(data.sensor_data)
@@ -81,9 +141,21 @@ async def online_learning(data: OnlineLearningData) -> Dict[str, Any]:
                 clf = fresh
                 update_type = "retrain_for_consistency"
             else:
-                clf.online_update(df, new_labels, use_augmentation=True, n_augmentations=2)
+                # Refit from the full accumulated history + this batch. We route
+                # even same-class commits through retrain_with_all_data rather
+                # than the in-memory online_update: after a model reload the
+                # classifier's last_training_data is empty, so online_update
+                # would train on this single-class batch alone and crash with
+                # "target y needs more than 1 class". retrain_with_all_data pulls
+                # history from the persistent CSV, so training stays multi-class.
+                ok, accuracy, fresh = retrain_with_all_data(
+                    clf, df, new_labels, use_augmentation=True, n_augmentations=2,
+                )
+                if not ok or fresh is None:
+                    raise HTTPException(status_code=500, detail="Retraining failed")
+                state.set_classifier(fresh)
+                clf = fresh
                 update_type = "online_update"
-                accuracy = clf.training_history["accuracy"][-1] if clf.training_history["accuracy"] else 0.0
         else:
             print("[online_learning] initial training")
             ok, accuracy, fresh = retrain_with_all_data(
@@ -117,6 +189,7 @@ async def online_learning(data: OnlineLearningData) -> Dict[str, Any]:
             "model_reloaded": reloaded,
             "new_classes_detected": len(new_classes) > 0,
             "inconsistency_fixed": mismatch,
+            "provenance": provenance_meta,
         }
     except HTTPException:
         raise
@@ -230,6 +303,38 @@ async def learn_from_csv(data: CSVLearningData) -> Dict[str, Any]:
         print(f"[learn_from_csv] error: {e}")
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/smell/provenance")
+async def list_provenance(
+    limit: int = 100,
+    label: Optional[str] = None,
+) -> Dict[str, Any]:
+    """List recent autonomous-training commits. Used by ``scripts/audit_auto_labels.py``.
+
+    Returns the metadata JSONs in ``data/provenance/`` sorted by ``saved_at``
+    descending (newest first). Each entry is the same dict that
+    ``/smell/online_learning`` returns under the ``provenance`` key, so the
+    audit tool sees one consistent schema.
+    """
+    if not os.path.isdir(PROVENANCE_DIR):
+        return {"count": 0, "entries": []}
+    entries: list[Dict[str, Any]] = []
+    for fname in sorted(os.listdir(PROVENANCE_DIR), reverse=True):
+        if not fname.endswith(".json"):
+            continue
+        try:
+            with open(os.path.join(PROVENANCE_DIR, fname), "r") as f:
+                meta = json.load(f)
+        except Exception as e:  # pragma: no cover — corrupt file
+            print(f"[provenance] read {fname} failed: {e}")
+            continue
+        if label and meta.get("label") != label:
+            continue
+        entries.append(meta)
+        if len(entries) >= max(1, limit):
+            break
+    return {"count": len(entries), "entries": entries}
 
 
 @router.post("/training_pipeline")

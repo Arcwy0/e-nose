@@ -136,8 +136,10 @@ textarea{resize:vertical;font-family:monospace;font-size:.85rem}
       <div class="brow">
         <button class="btn bp" onclick="classify()">&#128269; Classify smell</button>
         <button class="btn bs" onclick="clearAll()">Clear</button>
-        <button class="btn bs" style="font-size:.8rem;padding:.3rem .7rem" onclick="fillEx('coffee')">Try: coffee</button>
-        <button class="btn bs" style="font-size:.8rem;padding:.3rem .7rem" onclick="fillEx('air')">Try: air</button>
+        <!-- One "Try: <class>" button per smell the model actually knows,
+             filled from /smell/class_examples. Falls back to the two built-in
+             examples when the model is unfitted. -->
+        <span id="try-btns" style="display:contents"></span>
       </div>
       <div id="cr"></div>
     </div>
@@ -264,10 +266,15 @@ const RES=['R1','R2','R3','R4','R5','R6','R7','R8','R9','R10','R11','R12','R13',
 const ENV=['T','H','CO2','H2S','CH2O'];
 const ALL=[...RES,...ENV];
 const UNITS={T:'°C',H:'%',CO2:'ppm',H2S:'ppm',CH2O:'ppm'};
+// Built-in fallback examples — only used before the model is trained.
 const EX={
   coffee:[15.2,8.3,12.1,3.4,18.9,11.2,9.8,6.7,14.3,10.5,13.2,7.8,5.6,12.4,8.9,6.3,11.7,21.0,49.0,400,0.0,5.0],
   air:[0.1,0.05,0.08,0.02,0.12,0.09,0.06,0.04,0.11,0.07,0.08,0.05,0.03,0.09,0.06,0.04,0.08,21.0,49.0,400,0.0,5.0],
 };
+// Per-class example vectors fetched from /smell/class_examples (the mean of the
+// model's training data). Repopulated on load and after every retrain so the
+// "Try" buttons always match the classifier's current known smells.
+let EX_DYN={};
 
 function mkGrid(){
   const rg=document.getElementById('rgrid');
@@ -291,7 +298,7 @@ function p2g(){
   if(parts.length!==22)return;
   ALL.forEach((n,i)=>{const e=document.getElementById('s_'+n);if(e)e.value=parts[i]||'';});
 }
-document.addEventListener('DOMContentLoaded',()=>{mkGrid();document.getElementById('qp').addEventListener('input',p2g);refreshStatus();});
+document.addEventListener('DOMContentLoaded',()=>{mkGrid();document.getElementById('qp').addEventListener('input',p2g);renderTryButtons();refreshStatus();loadClassExamples();});
 
 function showTab(t){
   ['classify','train','live','status'].forEach((x,i)=>{
@@ -307,7 +314,25 @@ function vals(){
   if(p){const a=p.split(',').map(x=>parseFloat(x.trim()));if(a.length===22&&a.every(x=>!isNaN(x)))return a;}
   return ALL.map(n=>{const e=document.getElementById('s_'+n);return e?(parseFloat(e.value)||0):0;});
 }
-function fillEx(k){const v=EX[k];if(!v)return;document.getElementById('qp').value=v.join(', ');p2g();}
+function fillEx(k){const v=EX_DYN[k]||EX[k];if(!v)return;document.getElementById('qp').value=v.join(', ');p2g();}
+
+function renderTryButtons(){
+  const box=document.getElementById('try-btns');
+  if(!box)return;
+  const src=Object.keys(EX_DYN).length?EX_DYN:EX;
+  box.innerHTML=Object.keys(src).map(k=>{
+    const safe=k.replace(/'/g,"\\'");
+    return `<button class="btn bs" style="font-size:.8rem;padding:.3rem .7rem" onclick="fillEx('${safe}')">Try: ${k}</button>`;
+  }).join('');
+}
+async function loadClassExamples(){
+  try{
+    const r=await fetch('/smell/class_examples',{cache:'no-store'});
+    const d=await r.json();
+    EX_DYN=d.examples||{};
+  }catch(e){EX_DYN={};}
+  renderTryButtons();
+}
 function clearAll(){ALL.forEach(n=>{const e=document.getElementById('s_'+n);if(e)e.value='';});document.getElementById('qp').value='';document.getElementById('cr').innerHTML='';}
 function msg(id,cls,html){document.getElementById(id).innerHTML=`<div class="msg ${cls}">${html}</div>`;}
 
@@ -393,7 +418,10 @@ async function trainCsv(){
     const cls=(d.classes||[]).join(', ')||'(none)';
     const acc=d.current_accuracy!=null?(d.current_accuracy*100).toFixed(2)+'%':'&mdash;';
     msg('tr','ok',`&#10003; Training complete!<br>Samples: ${d.samples_processed} &nbsp;|&nbsp; Accuracy: ${acc}<br>Update: ${d.update_type}<br>Known smells: <strong>${cls}</strong>`);
-    refreshStatus();
+    // Refresh everything that depends on the model so the UI never shows a
+    // stale view after a retrain: top badges, Model Info tab, and the dynamic
+    // "Try" buttons (which mirror the current known classes).
+    refreshStatus();loadInfo();loadClassExamples();
   }catch(e){msg('tr','err','Request failed: '+e.message);}
 }
 
@@ -406,7 +434,7 @@ async function refreshStatus(){
   const sb0=document.getElementById('srv-b');
   sb0.className='badge g';sb0.textContent=window.location.origin;
   try{
-    const r=await fetch('/');const d=await r.json();const m=d.models||{};
+    const r=await fetch('/',{cache:'no-store'});const d=await r.json();const m=d.models||{};
     const vb=document.getElementById('vlm-b');
     vb.className='badge '+(m.vlm_loaded?'g':'gr');
     vb.textContent='VLM: '+(m.vlm_loaded?'loaded':'not loaded');
@@ -424,7 +452,7 @@ async function refreshStatus(){
     sb.className='badge r';sb.textContent=window.location.origin+' (unreachable)';
   }
   try{
-    const r=await fetch('/smell/model_info');const d=await r.json();
+    const r=await fetch('/smell/model_info',{cache:'no-store'});const d=await r.json();
     const cls=d.classes||[];
     const sb=document.getElementById('cls-b');
     sb.className='badge '+(cls.length?'g':'gr');
@@ -436,7 +464,7 @@ async function loadInfo(){
   const el=document.getElementById('sdet');
   el.innerHTML='<span class="spin"></span> Loading&hellip;';
   try{
-    const r=await fetch('/smell/model_info');const d=await r.json();
+    const r=await fetch('/smell/model_info',{cache:'no-store'});const d=await r.json();
     if(!d.is_fitted){
       el.innerHTML='<div class="msg info">Model is not trained yet. Go to <strong>Train</strong> to upload a CSV file.</div>';return;
     }
@@ -445,6 +473,42 @@ async function loadInfo(){
     const acc=h.accuracy?.slice(-1)[0];
     const bal=h.balanced_accuracy?.slice(-1)[0];
     const tags=cls.map(c=>`<span class="ctag">${c}</span>`).join('');
+
+    // At-a-glance facts block — surfaces model metadata that used to be buried
+    // or not shown at all (feature count, calibration, sample totals).
+    const feat=d.features||{};
+    const calib=d.calibration||{};
+    const nFeat=(feat.model_input||feat.all||[]).length;
+    const total=d.total_training_samples||0;
+    const factsHtml=`<div class="lvmeta" style="margin-top:.75rem">
+      <div class="lvstat"><div class="k">Known classes</div><div class="v">${cls.length}</div></div>
+      <div class="lvstat"><div class="k">Features</div><div class="v">${nFeat}</div></div>
+      <div class="lvstat"><div class="k">Training samples</div><div class="v">${total}</div></div>
+      <div class="lvstat"><div class="k">Training runs</div><div class="v">${h.accuracy?.length||0}</div></div>
+      <div class="lvstat"><div class="k">Last accuracy</div><div class="v">${acc!=null?(acc*100).toFixed(1)+'%':'—'}</div></div>
+      <div class="lvstat"><div class="k">Balanced acc.</div><div class="v">${bal!=null?(bal*100).toFixed(1)+'%':'—'}</div></div>
+      <div class="lvstat"><div class="k">Calibration</div><div class="v" style="font-size:.9rem">${calib.enabled?(calib.method||'on'):'off'}</div></div>
+    </div>`;
+
+    // Class distribution — how many training samples back each class. Uneven
+    // bars flag under-represented smells that the model will predict weakly.
+    const dist=d.class_distribution||{};
+    const distKeys=Object.keys(dist);
+    let distHtml='';
+    if(distKeys.length){
+      const mx=Math.max(...distKeys.map(k=>dist[k]),1);
+      const denom=total||distKeys.reduce((s,k)=>s+dist[k],0)||1;
+      const rows=distKeys.sort((a,b)=>dist[b]-dist[a]).map(k=>{
+        const n=dist[k];const pct=(n/denom*100).toFixed(1);
+        return `<div class="prow">
+          <div class="pname" title="${k}">${k}</div>
+          <div class="pbg"><div class="pbar" style="width:${(n/mx*100).toFixed(1)}%;background:#2563eb"></div></div>
+          <div class="ppct">${n}</div></div>`;
+      }).join('');
+      distHtml=`<h3 style="font-size:.95rem;margin-top:1rem;margin-bottom:.5rem">Class distribution
+        <span style="font-weight:400;color:var(--muted);font-size:.8rem">(${denom} samples total)</span></h3>
+        <div class="plist">${rows}</div>`;
+    }
 
     // Per-class P/R/F1 table — empty dict when the loaded model predates
     // metric persistence; the hint below nudges the user to retrain.
@@ -501,9 +565,8 @@ async function loadInfo(){
     el.innerHTML=`
       <p><strong>Known smells (${cls.length}):</strong></p>
       <div class="ctags">${tags||'<em style="color:var(--muted)">none yet</em>'}</div>
-      ${acc!=null?`<p style="margin-top:.75rem"><strong>Last accuracy:</strong> ${(acc*100).toFixed(2)}%
-        &nbsp;|&nbsp; Balanced: ${bal!=null?(bal*100).toFixed(2)+'%':'&mdash;'}</p>`:''}
-      <p style="margin-top:.5rem"><strong>Training runs:</strong> ${h.accuracy?.length||0}</p>
+      ${factsHtml}
+      ${distHtml}
       ${pcmHtml}
       ${cmHtml}
       <p style="margin-top:1rem;font-size:.82rem;color:var(--muted)">Full API docs: <a href="/docs" target="_blank">/docs</a></p>`;
@@ -541,7 +604,7 @@ function lvToggle(){
 }
 async function lvPollOnce(){
   try{
-    const r=await fetch(`/sensor/live/recent?since=${LV.lastId}&limit=500`);
+    const r=await fetch(`/sensor/live/recent?since=${LV.lastId}&limit=500`,{cache:'no-store'});
     if(!r.ok)throw new Error('HTTP '+r.status);
     const d=await r.json();
     const items=d.items||[];
@@ -699,7 +762,7 @@ async function drRefresh(){
   body.innerHTML='<span class="spin"></span> Computing drift&hellip;';
   sum.textContent='';
   try{
-    const r=await fetch('/smell/drift');
+    const r=await fetch('/smell/drift',{cache:'no-store'});
     const d=await r.json();
     if(!r.ok){body.innerHTML=`<div class="msg err">${d.detail||'error'}</div>`;return;}
     const ps=d.per_sensor||{};

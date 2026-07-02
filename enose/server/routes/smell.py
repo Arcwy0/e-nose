@@ -6,12 +6,41 @@ from typing import Any, Dict
 
 from fastapi import APIRouter, HTTPException
 
-from enose.config import ENVIRONMENTAL_SENSORS, RESISTANCE_SENSORS
+from fastapi.responses import JSONResponse
+
+from enose.config import ALL_SENSORS, ENVIRONMENTAL_SENSORS, RESISTANCE_SENSORS
 
 from .. import state
+from ..jsonsafe import json_safe
 from ..schemas import ConsoleSensorData, SensorData
 
 router = APIRouter(prefix="/smell")
+
+_NO_STORE = {"Cache-Control": "no-store, no-cache, must-revalidate", "Pragma": "no-cache"}
+
+
+@router.get("/class_examples")
+async def class_examples() -> JSONResponse:
+    """Representative sensor vector per known class — powers the UI's dynamic
+    "Try: <class>" buttons.
+
+    ``examples`` maps each class to a 22-value list in ``order`` (ALL_SENSORS)
+    order, computed as the per-class mean of the classifier's retained training
+    data. Returns empty maps when the model is unfitted or holds no training
+    data, so the UI can fall back to its built-in examples.
+    """
+    clf = state.smell_classifier
+    examples: Dict[str, Any] = {}
+    if clf is not None and getattr(clf, "is_fitted", False) and hasattr(clf, "class_example_vectors"):
+        try:
+            examples = clf.class_example_vectors()
+        except Exception as e:  # pragma: no cover — best-effort
+            print(f"[class_examples] error: {e}")
+            examples = {}
+    return JSONResponse(
+        json_safe({"order": list(ALL_SENSORS), "classes": list(examples.keys()), "examples": examples}),
+        headers=_NO_STORE,
+    )
 
 
 @router.post("/classify")

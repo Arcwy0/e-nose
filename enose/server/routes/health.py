@@ -5,6 +5,7 @@ from __future__ import annotations
 import datetime
 
 from fastapi import APIRouter, HTTPException
+from fastapi.responses import JSONResponse
 
 from enose.config import (
     ENVIRONMENTAL_SENSORS,
@@ -15,6 +16,7 @@ from enose.config import (
 )
 
 from .. import state
+from ..jsonsafe import json_safe
 
 router = APIRouter()
 
@@ -76,12 +78,20 @@ async def health_check() -> dict:
     }
 
 
+# Metadata endpoints must never be served from the browser cache — after a
+# retrain the UI polls these and has to see the fresh model, not a stale copy.
+_NO_STORE = {"Cache-Control": "no-store, no-cache, must-revalidate", "Pragma": "no-cache"}
+
+
 @router.get("/smell/model_info")
-async def get_model_info() -> dict:
+async def get_model_info() -> JSONResponse:
     if state.smell_classifier is None:
-        return {"model_loaded": False, "message": "Smell classifier not available"}
+        return JSONResponse(
+            {"model_loaded": False, "message": "Smell classifier not available"},
+            headers=_NO_STORE,
+        )
     try:
-        return state.smell_classifier.get_model_info()
+        return JSONResponse(json_safe(state.smell_classifier.get_model_info()), headers=_NO_STORE)
     except Exception as e:
         print(f"[model_info] error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
