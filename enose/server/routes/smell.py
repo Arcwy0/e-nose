@@ -12,7 +12,7 @@ from enose.config import ALL_SENSORS, ENVIRONMENTAL_SENSORS, RESISTANCE_SENSORS
 
 from .. import state
 from ..jsonsafe import json_safe
-from ..schemas import ConsoleSensorData, SensorData
+from ..schemas import BaselineData, ConsoleSensorData, SensorData
 
 router = APIRouter(prefix="/smell")
 
@@ -217,3 +217,32 @@ async def debug_input(payload: Dict[str, Any]) -> Dict[str, Any]:
     except Exception as e:
         print(f"[debug_input] error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/baseline")
+async def set_baseline(data: BaselineData) -> Dict[str, Any]:
+    """Set the current session's clean-air drift baseline from air readings.
+
+    Call this once at the start of a session (~30–60 s of clean air) so a
+    drift-robust model references today's samples to today's air. Harmless /
+    no-op for a model trained in absolute mode (`baseline_mode='none'`): the
+    baseline is stored but never used, and classification behaves as before.
+    """
+    clf = state.require_fitted_classifier()
+    if not data.sensor_data:
+        raise HTTPException(status_code=400, detail="sensor_data (clean-air readings) required")
+    mode = getattr(getattr(clf, "config", None), "baseline_mode", "none") or "none"
+    if not hasattr(clf, "update_baseline"):
+        return {"applied": False, "baseline_mode": mode,
+                "message": "classifier backend does not support baseline capture"}
+    baseline = clf.update_baseline(data.sensor_data, ema=bool(data.ema))
+    return {
+        "applied": mode != "none",
+        "baseline_mode": mode,
+        "n_sensors": len(baseline),
+        "n_air_samples": len(data.sensor_data),
+        "message": (
+            "baseline updated" if mode != "none"
+            else "stored but unused (model trained in absolute mode)"
+        ),
+    }

@@ -61,6 +61,17 @@ class OnlineLearningData(BaseModel):
     provenance: Optional[CommitProvenance] = None
 
 
+class BaselineData(BaseModel):
+    """Clean-air readings that define the current session's drift baseline.
+
+    Sent at the start of a session (~30–60 s of clean air). Only used when the
+    active model was trained with a baseline_mode; a no-op for absolute models.
+    """
+
+    sensor_data: List[Dict[str, float]]
+    ema: bool = False
+
+
 class CSVLearningData(BaseModel):
     """CSV (as a string) + training hyperparameters."""
 

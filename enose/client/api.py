@@ -68,6 +68,25 @@ class ServerAPI:
         except Exception as e:
             return None, f"Model info error: {e}"
 
+    def set_baseline(self, air_samples: List[Dict[str, float]], ema: bool = False) -> Result:
+        """Register this session's clean-air baseline for drift-robust models.
+
+        Call once at session start with ~30–60 s of clean-air readings. No-op
+        server-side when the model was trained in absolute mode. See
+        ``enose.server.schemas.BaselineData``.
+        """
+        try:
+            r = requests.post(
+                f"{self.base_url}/smell/baseline",
+                json={"sensor_data": air_samples, "ema": bool(ema)},
+                timeout=15,
+            )
+            return self._handle_response(r)
+        except requests.exceptions.Timeout:
+            return None, "Baseline timeout"
+        except Exception as e:
+            return None, f"Baseline error: {e}"
+
     # ── Vision ────────────────────────────────────────────────────────────
     def detect_object(self, image_path: str, object_name: str) -> Result:
         try:
