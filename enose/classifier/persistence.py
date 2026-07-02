@@ -56,6 +56,11 @@ def build_save_payload(classifier) -> Dict[str, Any]:
         "confusion_matrix_": getattr(classifier, "confusion_matrix_", None),
         "confusion_labels_": list(getattr(classifier, "confusion_labels_", []) or []),
         "last_test_size_": int(getattr(classifier, "last_test_size_", 0) or 0),
+        # Compact training-set summaries — persisted so /smell/model_info and
+        # /smell/class_examples keep working after the server reloads the model
+        # from disk (which does not restore last_training_data).
+        "class_distribution_": dict(getattr(classifier, "class_distribution_", {}) or {}),
+        "class_examples_": dict(getattr(classifier, "class_examples_", {}) or {}),
     }
 
 
@@ -189,4 +194,9 @@ def load(path: str, cls) -> "cls":
     obj.confusion_matrix_ = payload.get("confusion_matrix_", None)
     obj.confusion_labels_ = list(payload.get("confusion_labels_", []) or [])
     obj.last_test_size_ = int(payload.get("last_test_size_", 0) or 0)
+
+    # Compact training summaries — empty on legacy payloads (the UI then shows
+    # the built-in "Try" examples and an empty distribution until a retrain).
+    obj.class_distribution_ = dict(payload.get("class_distribution_", {}) or {})
+    obj.class_examples_ = dict(payload.get("class_examples_", {}) or {})
     return obj

@@ -82,8 +82,14 @@ class BalancedRFClassifier(SmellClassifierBase):
         self.confusion_labels_: List[str] = []
         self.last_test_size_: int = 0
 
+        # Compact training-set summaries computed at train() time and persisted,
+        # so /smell/model_info and /smell/class_examples keep working after the
+        # server reloads the model from disk (which drops last_training_data).
+        self.class_distribution_: Dict[str, int] = {}
+        self.class_examples_: Dict[str, List[float]] = {}
+
     # ── model construction ──────────────────────────────────────────────────
-    def _build_model(self):
+    def _build_model(self, y_fit=None):
         base = BalancedRandomForestClassifier(
             n_estimators=self.config.n_estimators,
             max_depth=self.config.max_depth,
@@ -92,7 +98,31 @@ class BalancedRFClassifier(SmellClassifierBase):
         )
         if not self.config.calibrated:
             return base
-        return self._make_calibrator(base, method=self.config.calibration_method, cv=3)
+
+        # Adaptive calibration CV. CalibratedClassifierCV runs an internal
+        # StratifiedKFold, which raises "y needs more than 1 class" (HTTP 500
+        # at the API) whenever any class has fewer samples than the fold count.
+        # Small new-scent batches from Idea-1 online learning hit this
+        # routinely. Clamp the fold count to the smallest per-class count, and
+        # skip calibration entirely when a class is too small to split at all
+        # (uncalibrated probabilities beat a crashed fit).
+        cv = 3
+        if y_fit is not None:
+            _, counts = np.unique(np.asarray(y_fit), return_counts=True)
+            min_class = int(counts.min()) if len(counts) else 0
+            if len(counts) < 2:
+                print("[train] only one class present — skipping probability calibration")
+                return base
+            if min_class < 2:
+                print(
+                    f"[train] smallest class has {min_class} sample(s) — "
+                    "skipping probability calibration (needs ≥2 per class)"
+                )
+                return base
+            cv = max(2, min(3, min_class))
+            if cv < 3:
+                print(f"[train] small classes (min={min_class}) — calibration cv={cv}")
+        return self._make_calibrator(base, method=self.config.calibration_method, cv=cv)
 
     def _build_scaler(self):
         """RobustScaler by default — less sensitive to the outliers and
@@ -281,7 +311,7 @@ class BalancedRFClassifier(SmellClassifierBase):
             .mean()
         )
 
-        self.model = self._build_model()
+        self.model = self._build_model(y_fit=y_train.values)
         print(
             f"[train] fitting {type(self.model).__name__} on "
             f"{len(feats)} features (use_env_sensors="
@@ -300,7 +330,34 @@ class BalancedRFClassifier(SmellClassifierBase):
         self.training_history["accuracy"].append(float(acc))
         self.training_history["balanced_accuracy"].append(float(bal_acc))
         self._log_test_report(y_test, y_pred, acc, bal_acc)
+        self._compute_training_summaries()
         return float(bal_acc)
+
+    def _compute_training_summaries(self) -> None:
+        """Cache compact per-class training summaries (counts + mean feature
+        vectors) so they survive save→reload. Uses the retained training frame,
+        which is present right after ``train()``/``online_update()``.
+        """
+        df = self.last_training_data
+        if df is None or not len(df) or self._label_col not in getattr(df, "columns", []):
+            self.class_distribution_ = {}
+            self.class_examples_ = {}
+            return
+        try:
+            counts = df[self._label_col].value_counts()
+            self.class_distribution_ = {str(k): int(v) for k, v in counts.items()}
+        except Exception:
+            self.class_distribution_ = {}
+        present = [s for s in self.ALL_SENSORS if s in df.columns]
+        examples: Dict[str, List[float]] = {}
+        if present:
+            try:
+                means = df.groupby(self._label_col)[present].mean()
+                for lbl, row in means.iterrows():
+                    examples[str(lbl)] = [round(float(row.get(s, 0.0)), 4) for s in self.ALL_SENSORS]
+            except Exception:
+                examples = {}
+        self.class_examples_ = examples
 
     # ── split + reporting helpers ───────────────────────────────────────────
     def _split(
@@ -587,7 +644,62 @@ class BalancedRFClassifier(SmellClassifierBase):
             "confusion_matrix": self.confusion_matrix_,
             "confusion_labels": list(self.confusion_labels_ or []),
             "last_test_size": int(getattr(self, "last_test_size_", 0) or 0),
+            # Full-dataset class balance (not just the last test split's
+            # support) so the UI can show how many samples back each class.
+            "class_distribution": self._class_distribution(),
+            # Prefer the live frame; fall back to the persisted per-class counts
+            # so the total stays consistent with class_distribution after a
+            # reload (which drops last_training_data).
+            "total_training_samples": (
+                int(len(self.last_training_data))
+                if self.last_training_data is not None
+                else int(sum(self.class_distribution_.values()))
+            ),
         }
+
+    def _class_distribution(self) -> Dict[str, int]:
+        """Per-class training-sample counts.
+
+        Prefers the cached summary (persisted, survives reload); falls back to
+        recomputing from the retained training frame when present. Empty dict
+        for legacy artifacts that carry neither.
+        """
+        if self.class_distribution_:
+            return dict(self.class_distribution_)
+        df = self.last_training_data
+        if df is None or self._label_col not in getattr(df, "columns", []):
+            return {}
+        try:
+            counts = df[self._label_col].value_counts()
+            return {str(k): int(v) for k, v in counts.items()}
+        except Exception:
+            return {}
+
+    def class_example_vectors(self) -> Dict[str, List[float]]:
+        """Representative 22-feature vector per class (mean of training data),
+        ordered to ``ALL_SENSORS``.
+
+        Powers the UI's dynamic "Try: <class>" buttons so every known scent
+        gets a one-click example. Prefers the cached summary (persisted); falls
+        back to recomputing from the retained training frame. Empty when
+        neither is available.
+        """
+        if self.class_examples_:
+            return {k: list(v) for k, v in self.class_examples_.items()}
+        df = self.last_training_data
+        if df is None or not len(df) or self._label_col not in getattr(df, "columns", []):
+            return {}
+        present = [s for s in self.ALL_SENSORS if s in df.columns]
+        if not present:
+            return {}
+        try:
+            means = df.groupby(self._label_col)[present].mean()
+        except Exception:
+            return {}
+        out: Dict[str, List[float]] = {}
+        for lbl, row in means.iterrows():
+            out[str(lbl)] = [round(float(row.get(s, 0.0)), 4) for s in self.ALL_SENSORS]
+        return out
 
     def analyze_data_quality(self, output_dir: Optional[str] = None) -> Dict[str, Any]:
         """`output_dir` accepted for API compat; `analyze_data_quality` is stats-only."""
