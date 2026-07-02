@@ -19,7 +19,7 @@ from enose.vision.gpu import check_gpu_availability
 
 from . import state
 from .model_loader import load_or_create_classifier
-from .routes import analytics, health, live, smell, training, ui
+from .routes import analytics, health, live, smell, training, ui, vision
 
 # Set ENOSE_NO_VLM=1 to start without loading Florence-2 (classifier-only / offline testing mode).
 _NO_VLM = os.environ.get("ENOSE_NO_VLM", "0").lower() in ("1", "true", "yes")
@@ -86,6 +86,7 @@ def create_app() -> FastAPI:
     app.include_router(training.router)
     app.include_router(analytics.router)
     app.include_router(live.router)
+    app.include_router(vision.router)
     app.include_router(ui.router)
 
     @app.exception_handler(Exception)

@@ -1,0 +1,23 @@
+[
+  {
+    "label": "rose",
+    "aliases": ["red rose"],
+    "waypoints": [{"x": 1.6, "y": 0.0, "theta": 0.0}],
+    "world_pose": {"x": 2.0, "y": 0.0, "theta": 0.0},
+    "detection_score": 0.35
+  },
+  {
+    "label": "coffee",
+    "aliases": ["coffee cup", "mug"],
+    "waypoints": [{"x": 1.6, "y": 2.0, "theta": 0.0}],
+    "world_pose": {"x": 2.0, "y": 2.0, "theta": 0.0},
+    "detection_score": 0.22
+  },
+  {
+    "label": "lemon",
+    "aliases": [],
+    "waypoints": [{"x": 1.6, "y": 4.0, "theta": 0.0}],
+    "world_pose": {"x": 8.0, "y": 8.0, "theta": 0.0},
+    "detection_score": 0.40
+  }
+]

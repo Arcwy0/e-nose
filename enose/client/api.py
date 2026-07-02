@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import os
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import pandas as pd
 import requests
@@ -86,6 +86,32 @@ class ServerAPI:
         except Exception as e:
             return None, f"Detection error: {e}"
 
+    def detect_scene(self, image_path: str, labels: Sequence[str]) -> Result:
+        """Ground a list of candidate labels in one Florence-2 call.
+
+        Used by the robot mission policy at each SEARCH waypoint to score all
+        candidate targets without paying N separate round-trips. Returns the
+        ``{labels, detections, image_size, ...}`` payload from
+        ``POST /predict/scene``.
+        """
+        if not labels:
+            return None, "labels list cannot be empty"
+        try:
+            with open(image_path, "rb") as f:
+                files = {"image": (os.path.basename(image_path), f, "image/png")}
+                data = {"labels": json.dumps(list(labels))}
+                r = requests.post(
+                    f"{self.base_url}/predict/scene",
+                    files=files, data=data, timeout=60,
+                )
+            return self._handle_response(r)
+        except FileNotFoundError:
+            return None, f"Image not found: {image_path}"
+        except requests.exceptions.Timeout:
+            return None, "Scene detection timeout"
+        except Exception as e:
+            return None, f"Scene detection error: {e}"
+
     # ── Classification ────────────────────────────────────────────────────
     def classify_smell(self, sensor_data: Dict[str, float]) -> Result:
         try:
@@ -120,14 +146,25 @@ class ServerAPI:
             return None, f"Console test error: {e}"
 
     # ── Training ──────────────────────────────────────────────────────────
-    def online_learning(self, sensor_data: List[Dict[str, float]], object_name: str) -> Result:
+    def online_learning(
+        self,
+        sensor_data: List[Dict[str, float]],
+        object_name: str,
+        provenance: Optional[Dict[str, Any]] = None,
+    ) -> Result:
+        """Commit a labelled batch. ``provenance`` is an optional audit-trail
+        dict matching the server's ``CommitProvenance`` schema — see
+        ``enose.server.schemas.CommitProvenance`` and the robot policy's
+        ``_commit`` for the producer side."""
         try:
             if sensor_data and len(sensor_data[0]) != N_FEATURES:
                 print(f"Warning: expected {N_FEATURES} features, got {len(sensor_data[0])}")
-            payload = {
+            payload: Dict[str, Any] = {
                 "sensor_data": sensor_data,
                 "labels": [object_name] * len(sensor_data),
             }
+            if provenance is not None:
+                payload["provenance"] = provenance
             r = requests.post(
                 f"{self.base_url}/smell/online_learning",
                 json=payload, timeout=30,
@@ -137,6 +174,21 @@ class ServerAPI:
             return None, "Online learning timeout"
         except Exception as e:
             return None, f"Online learning error: {e}"
+
+    def list_provenance(self, limit: int = 100, label: Optional[str] = None) -> Result:
+        """List recent autonomous-training commits. Used by the audit tool."""
+        try:
+            params: Dict[str, Any] = {"limit": limit}
+            if label:
+                params["label"] = label
+            r = requests.get(
+                f"{self.base_url}/smell/provenance", params=params, timeout=10,
+            )
+            return self._handle_response(r)
+        except requests.exceptions.Timeout:
+            return None, "Provenance list timeout"
+        except Exception as e:
+            return None, f"Provenance list error: {e}"
 
     def learn_from_csv(
         self,
@@ -182,6 +234,28 @@ class ServerAPI:
             return None, f"CSV learning error: {e}"
 
     # ── Analytics ─────────────────────────────────────────────────────────
+    def get_settling(
+        self,
+        window: float = 8.0,
+        threshold: float = 0.02,
+        session_id: Optional[str] = None,
+    ) -> Result:
+        """Poll ``/smell/settling`` — see ``enose.server.routes.analytics`` for the schema.
+
+        Used by the robot's SETTLE state to decide when the sensor array
+        has stabilized.
+        """
+        try:
+            params: Dict[str, Any] = {"window": window, "threshold": threshold}
+            if session_id:
+                params["session_id"] = session_id
+            r = requests.get(f"{self.base_url}/smell/settling", params=params, timeout=5)
+            return self._handle_response(r)
+        except requests.exceptions.Timeout:
+            return None, "Settling check timeout"
+        except Exception as e:
+            return None, f"Settling check error: {e}"
+
     def visualize_data(self) -> Result:
         try:
             r = requests.get(f"{self.base_url}/smell/visualize_data", timeout=30)

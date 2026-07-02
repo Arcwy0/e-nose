@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Dict, List
+from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel
 
@@ -34,11 +34,31 @@ class SensorData(BaseModel):
     CH2O: float = 5.0
 
 
+class CommitProvenance(BaseModel):
+    """Optional audit trail attached to an autonomous-training commit.
+
+    The robot mission policy fills this in so a human can later inspect:
+    *what image the VLM saw*, *with what grounding score*, *with what robot
+    pose at sample time*. Without it, you can't tell why the classifier
+    learned a wrong label weeks after the mission.
+    """
+
+    grounding_score: float
+    bbox: Optional[List[float]] = None              # [x1, y1, x2, y2] pixels
+    pose: Optional[Dict[str, Any]] = None           # {x, y, theta, frame_id}
+    session_id: Optional[str] = None
+    detector_task: Optional[str] = None             # e.g. "<CAPTION_TO_PHRASE_GROUNDING>"
+    image_b64: Optional[str] = None                 # base64-encoded image bytes
+    image_filename: Optional[str] = None            # original filename hint
+    extras: Optional[Dict[str, Any]] = None         # free-form (notes, target label aliases, …)
+
+
 class OnlineLearningData(BaseModel):
     """Batch of labelled samples for incremental training."""
 
     sensor_data: List[Dict[str, float]]
     labels: List[str]
+    provenance: Optional[CommitProvenance] = None
 
 
 class CSVLearningData(BaseModel):

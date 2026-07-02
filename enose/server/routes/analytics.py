@@ -4,8 +4,11 @@ from __future__ import annotations
 
 from typing import Any, Dict, List
 
+import time
+from typing import Optional
+
 import numpy as np
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Query
 
 from enose.config import ALL_SENSORS, DATA_DIR, ENVIRONMENTAL_SENSORS, RESISTANCE_SENSORS
 
@@ -173,6 +176,139 @@ async def drift_report() -> Dict[str, Any]:
             "z_warn": 1.5, "z_out": 3.0,
             "std_ratio_warn": [0.5, 2.0], "std_ratio_out": [0.25, 4.0],
         },
+    }
+
+
+@router.get("/settling")
+async def settling(
+    window: float = Query(10.0, gt=0.0, le=300.0, description="Look-back window in seconds"),
+    threshold: float = Query(
+        0.02,
+        gt=0.0,
+        description=(
+            "Relative drift threshold: |slope / mean| (per second). A sensor is "
+            "'settled' when its drift falls below this. 0.02 ≈ 2% per second."
+        ),
+    ),
+    min_samples: int = Query(4, ge=2, description="Minimum samples required in the window"),
+    session_id: Optional[str] = Query(None, description="Restrict to a session_id if given"),
+) -> Dict[str, Any]:
+    """Per-resistance-sensor stability over the last ``window`` seconds.
+
+    Used by the robot mission policy's SETTLE state: poll this and only
+    proceed to RECORD when ``settled`` stays True for K consecutive seconds.
+    A small, dedicated endpoint here is cheaper than streaming raw samples
+    and recomputing on the client — the buffer already lives server-side.
+
+    Per-sensor fields:
+
+    * ``mean``, ``std`` — window stats.
+    * ``slope`` — least-squares ``dR/dt`` over the window.
+    * ``rel_slope`` — ``slope / max(|mean|, eps)``. Dimensionless drift / s.
+    * ``settled`` — ``|rel_slope| < threshold``.
+
+    Top-level ``settled`` is True iff ALL ``RESISTANCE_SENSORS`` are settled,
+    the window contains ≥ ``min_samples`` samples, and the time span covers
+    ≥ ``0.5 * window`` seconds (so we don't declare "settled" on too short
+    a slice).
+    """
+    items = live_buffer.snapshot()
+    if session_id:
+        items = [e for e in items if e.get("session_id") == session_id]
+    if not items:
+        return {
+            "settled": False,
+            "reason": "live buffer empty" + (f" for session_id={session_id}" if session_id else ""),
+            "n": 0,
+            "window": window,
+            "threshold": threshold,
+        }
+
+    now = time.time()
+    cutoff = now - window
+    win = [e for e in items if e.get("t", 0.0) >= cutoff]
+    n = len(win)
+    if n < min_samples:
+        return {
+            "settled": False,
+            "reason": f"not enough samples in window ({n} < {min_samples})",
+            "n": n,
+            "window": window,
+            "threshold": threshold,
+        }
+
+    ts = np.asarray([e["t"] for e in win], dtype=float)
+    span = float(ts.max() - ts.min())
+    if span < 0.5 * window:
+        return {
+            "settled": False,
+            "reason": f"time span too short ({span:.2f}s < {0.5 * window:.2f}s)",
+            "n": n,
+            "span_s": span,
+            "window": window,
+            "threshold": threshold,
+        }
+
+    eps = 1e-9
+    per_sensor: Dict[str, Dict[str, Any]] = {}
+    all_settled = True
+    worst_rel: float = 0.0
+    worst_name: Optional[str] = None
+
+    for name in RESISTANCE_SENSORS:
+        vals = np.asarray(
+            [e["sample"].get(name) for e in win if name in e.get("sample", {})],
+            dtype=float,
+        )
+        # Re-index ts to only the samples that actually have this sensor.
+        ts_for = np.asarray(
+            [e["t"] for e in win if name in e.get("sample", {})],
+            dtype=float,
+        )
+        mask = np.isfinite(vals) & np.isfinite(ts_for)
+        vals = vals[mask]
+        ts_for = ts_for[mask]
+        if vals.size < min_samples or (ts_for.max() - ts_for.min()) < 0.5 * window:
+            per_sensor[name] = {
+                "n": int(vals.size),
+                "mean": None, "std": None,
+                "slope": None, "rel_slope": None,
+                "settled": None,
+                "reason": "insufficient samples for this sensor",
+            }
+            all_settled = False
+            continue
+
+        mean = float(vals.mean())
+        std = float(vals.std(ddof=0))
+        # Linear least-squares slope: dR/dt.
+        # polyfit gives [slope, intercept].
+        slope = float(np.polyfit(ts_for, vals, 1)[0])
+        rel_slope = slope / max(abs(mean), eps)
+        settled = bool(abs(rel_slope) < threshold)
+        per_sensor[name] = {
+            "n": int(vals.size),
+            "mean": round(mean, 6),
+            "std": round(std, 6),
+            "slope": round(slope, 6),
+            "rel_slope": round(rel_slope, 6),
+            "settled": settled,
+        }
+        if not settled:
+            all_settled = False
+            if abs(rel_slope) > worst_rel:
+                worst_rel = abs(rel_slope)
+                worst_name = name
+
+    return {
+        "settled": bool(all_settled),
+        "n": n,
+        "span_s": span,
+        "window": window,
+        "threshold": threshold,
+        "worst_sensor": worst_name,
+        "worst_rel_slope": round(worst_rel, 6) if worst_name else 0.0,
+        "per_sensor": per_sensor,
     }
 
 

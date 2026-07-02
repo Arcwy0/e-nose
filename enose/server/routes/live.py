@@ -32,6 +32,23 @@ from ..live_buffer import buffer
 router = APIRouter(prefix="/sensor/live")
 
 
+class LivePose(BaseModel):
+    """Optional robot pose attached to a live sample.
+
+    Sent by the robot's mission node so every sample is spatially anchored —
+    required for Idea 2 (smell-aware navigation / spatial maps), useful for
+    Idea 1 (auditing where a training sample was taken). ``frame_id`` defaults
+    to ``"map"`` (the SLAM map frame); callers may override (e.g. ``"odom"``
+    when SLAM isn't running). The buffer stores it opaquely and the UI / robot
+    consumers interpret it.
+    """
+
+    x: float
+    y: float
+    theta: float
+    frame_id: str = "map"
+
+
 class LivePushPayload(BaseModel):
     """One sample published by the client. All fields optional except ``sample``.
 
@@ -45,6 +62,7 @@ class LivePushPayload(BaseModel):
     label: Optional[str] = None        # pre-assigned label, e.g. during training
     classify: bool = False             # ask server to also run /smell/classify
     session_id: Optional[str] = None   # groups samples from the same run
+    pose: Optional[LivePose] = None    # robot pose at sample time (Phase 0+)
 
 
 def _run_classifier(sample: Dict[str, float]) -> Optional[Dict[str, Any]]:
@@ -93,6 +111,8 @@ async def push_sample(payload: LivePushPayload) -> Dict[str, Any]:
         entry["label"] = str(payload.label)
     if payload.session_id:
         entry["session_id"] = str(payload.session_id)
+    if payload.pose is not None:
+        entry["pose"] = payload.pose.model_dump()
 
     if payload.classify:
         info = _run_classifier(clean)

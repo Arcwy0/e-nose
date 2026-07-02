@@ -71,6 +71,7 @@ class LivePublisher:
         session_label: Optional[str] = None,
         on_sample: Optional[Callable[[Dict], None]] = None,
         http_timeout: float = 2.0,
+        pose_lookup: Optional[Callable[[], Optional[Dict[str, float]]]] = None,
     ) -> None:
         self.sensor = sensor
         self.server_url = server_url.rstrip("/") if server_url else ""
@@ -80,6 +81,12 @@ class LivePublisher:
         self.session_label = session_label
         self.on_sample = on_sample
         self._timeout = http_timeout
+        # When set, called once per tick to get the robot's current pose;
+        # the returned dict (or None) is attached to the live-buffer push so
+        # every sample is spatially anchored. Required for Idea 2 / nice for
+        # Idea 1 audit. The callback runs on the publisher thread, must be
+        # cheap and must not raise (we still defend against it below).
+        self.pose_lookup = pose_lookup
 
         self._thread: Optional[threading.Thread] = None
         self._stop = threading.Event()
@@ -129,6 +136,9 @@ class LivePublisher:
                 "session_id": self.session_id,
                 "label": self.session_label,
             }
+            pose = self._lookup_pose()
+            if pose is not None:
+                entry["pose"] = pose
             # Fire local callback first — the plot cares about smoothness
             # more than it cares about server round-trips.
             if self.on_sample is not None:
@@ -138,7 +148,22 @@ class LivePublisher:
                     pass
 
             if self.server_url:
-                self._push(now, sample, entry)
+                self._push(now, sample, entry, pose=pose)
+
+    def _lookup_pose(self) -> Optional[Dict[str, float]]:
+        if self.pose_lookup is None:
+            return None
+        try:
+            pose = self.pose_lookup()
+        except Exception as e:  # pragma: no cover — defensive
+            self.last_error = f"pose: {e}"
+            return None
+        if not pose:
+            return None
+        # Be lenient: require at least x, y, theta. frame_id defaults server-side.
+        if not all(k in pose for k in ("x", "y", "theta")):
+            return None
+        return pose
 
     def _read_one(self) -> Optional[Dict[str, float]]:
         try:
@@ -152,7 +177,13 @@ class LivePublisher:
             return None
         return s
 
-    def _push(self, t: float, sample: Dict[str, float], entry: Dict) -> None:
+    def _push(
+        self,
+        t: float,
+        sample: Dict[str, float],
+        entry: Dict,
+        pose: Optional[Dict[str, float]] = None,
+    ) -> None:
         payload = {
             "sample": sample,
             "client_t": t,
@@ -161,6 +192,8 @@ class LivePublisher:
         }
         if self.session_label:
             payload["label"] = self.session_label
+        if pose is not None:
+            payload["pose"] = pose
         try:
             r = requests.post(
                 f"{self.server_url}/sensor/live/push",

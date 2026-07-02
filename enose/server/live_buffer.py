@@ -16,6 +16,9 @@ Each entry is a plain dict so the payload is cheap to serialize as JSON:
                                     # asked the server to classify too
         "confidence": 0.87,
         "probs": {"air": .., "coffee": ..},     # top-k probabilities
+        "pose": {"x": .., "y": .., "theta": .., "frame_id": "map"},  # optional
+                                    # robot pose attached by the mission node;
+                                    # required for spatial-map / plume tracing
     }
 """
 
