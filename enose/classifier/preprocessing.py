@@ -175,11 +175,18 @@ def compute_air_baseline(
     cols = [c for c in RESISTANCE_SENSORS if c in df.columns]
     if not cols:
         return {}
-    sub = df
     if label_col in df.columns:
         mask = df[label_col].astype(str).str.lower().eq(str(air_label).lower())
-        if mask.any():
-            sub = df.loc[mask]
+        if not mask.any():
+            # No clean-air rows in this frame — signal empty so the caller can
+            # fall back to a global baseline instead of referencing a smell to
+            # itself (which would wipe out the signal).
+            return {}
+        sub = df.loc[mask]
+    else:
+        # No label column → treat every row as air (used by update_baseline,
+        # where the operator sends a pure clean-air batch).
+        sub = df
     R = sub[cols].astype(float)
     R = R.where(R > 0.0)
     out: Dict[str, float] = {}
@@ -257,10 +264,14 @@ def apply_baseline_relative_per_group(
         return df.copy(), {}
     out = df.copy()
     baselines: Dict[str, Dict[str, float]] = {}
+    # Global air baseline (over the whole frame) — the fallback for groups that
+    # contain no air rows (e.g. single-label groups from auto run-ids). Groups
+    # that DO carry air (proper per-session data) use their own, tighter baseline.
+    global_bl = compute_air_baseline(df, air_label=air_label, label_col=label_col)
     g = pd.Series(list(groups), index=df.index).astype(str)
     for gid, idx in g.groupby(g).groups.items():
         block = df.loc[idx]
-        b = compute_air_baseline(block, air_label=air_label, label_col=label_col)
+        b = compute_air_baseline(block, air_label=air_label, label_col=label_col) or global_bl
         baselines[str(gid)] = b
         out.loc[idx, :] = baseline_relative_resistances(block, b, mode)
     return out, baselines
