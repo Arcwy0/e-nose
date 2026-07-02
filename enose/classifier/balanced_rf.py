@@ -736,6 +736,14 @@ class BalancedRFClassifier(SmellClassifierBase):
                 "enabled": self.config.calibrated,
                 "method": self.config.calibration_method,
             },
+            # Drift-invariant feature representation this model uses (so the UI /
+            # operator can see whether it's the absolute or a baseline-relative
+            # model, and whether a live session baseline has been captured).
+            "drift": {
+                "baseline_mode": getattr(self.config, "baseline_mode", "none"),
+                "snv": bool(getattr(self.config, "snv", False)),
+                "baseline_captured": bool(self.sensor_baseline_),
+            },
             # Per-class precision/recall/F1 from the most recent test split.
             # Empty dict if this classifier was loaded from a pre-metrics
             # artifact — the UI renders a "retrain to populate" hint in that
