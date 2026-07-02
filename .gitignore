@@ -117,10 +117,14 @@ runs/
 plots/
 data/plots/
 data/*.csv
-!data/enose_points_1906.csv          # small reference sample kept in-tree
+# small reference sample kept in-tree
+!data/enose_points_1906.csv
 !data/README.md
 !data/.gitkeep
-database_robodog*.csv                # root-level auto-generated training log
+# root-level auto-generated training log
+database_robodog*.csv
+# autonomous-training audit trail (runtime data, not source)
+data/provenance/
 temp_capture.png
 *.log
 
