@@ -11,28 +11,44 @@ requires-python = ">=3.9"
 authors = [{ name = "Sense" }]
 license = { text = "MIT" }
 
-# Heavy deps (torch, transformers, imbalanced-learn, xgboost) live in the Docker image,
-# not here — so the package can be installed on the host without a CUDA toolchain.
+# Base deps are the light, universally-wheel-available packages both the client
+# and server share. Everything with a version pin that historically fails to
+# build on a fresh Windows Python (numpy<2, scikit-learn<1.6) or that only the
+# server needs (fastapi/uvicorn) lives in the `server` extra, so a client-only
+# install (`pip install "enose[client]"`) stays lightweight and pip can resolve
+# it entirely from prebuilt wheels. Heavy ML deps (torch, transformers,
+# imbalanced-learn, xgboost) live in the Docker image / the extras below.
 dependencies = [
+    "numpy>=1.24",
+    "pandas>=2.0,<3.0",
+    "pillow>=10.0",
+    "requests>=2.31",
+]
+
+[project.optional-dependencies]
+# Robot-dog / colleague client: sensors, camera, live plot, REST calls.
+# No fastapi, no scikit-learn, no numpy<2 pin — the exact things that broke
+# the Windows wheel build. Install with: pip install "enose[client]"
+client = [
+    "pyserial>=3.5",
+    "matplotlib>=3.7",
+    "opencv-python>=4.8",
+]
+# FastAPI server + classifier runtime. The numpy<2 / scikit-learn<1.6 pins that
+# imbalanced-learn 0.12 needs are scoped here (server-side only).
+server = [
     "fastapi>=0.110,<0.120",
     "uvicorn[standard]>=0.29",
     "pydantic>=2.5",
     "python-multipart>=0.0.9",
     # numpy<2 — xgboost 2.1 / imbalanced-learn 0.12 use numpy-1 ABIs
     "numpy>=1.24,<2.0",
-    "pandas>=2.0,<3.0",
     # scikit-learn<1.6 — imbalanced-learn 0.12 imports the private symbol
     # sklearn.utils._tags._safe_tags which was removed in 1.6.
     "scikit-learn>=1.3,<1.6",
     "joblib>=1.3",
     "matplotlib>=3.7",
-    "pillow>=10.0",
-    "requests>=2.31",
-    "pyserial>=3.5",
-    "opencv-python>=4.8",
 ]
-
-[project.optional-dependencies]
 vision = [
     "torch>=2.1",
     # Florence-2's bundled configuration_florence2.py references

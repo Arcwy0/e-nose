@@ -60,10 +60,15 @@ git clone https://github.com/YOUR_USERNAME/e-nose.git
 cd e-nose
 python -m venv .venv
 source .venv/bin/activate          # Windows: .\.venv\Scripts\Activate.ps1
-pip install -e ".[classifier-extras]"
+pip install -e ".[client]"
 ```
 
-That's the full client. No CUDA, no Florence-2 weights — the server handles all the heavy lifting.
+That's the full client — a lightweight set of deps (pyserial, matplotlib,
+opencv-python, numpy, pandas, pillow, requests). No CUDA, no Florence-2 weights,
+no fastapi / scikit-learn — the server handles all the heavy lifting.
+
+> **Windows colleagues:** you don't even need `git clone` or a compiler — install
+> the prebuilt wheel instead. See [CLIENT_WINDOWS_INSTALL.md](CLIENT_WINDOWS_INSTALL.md).
 
 Now jump to the [scenario cheatsheet](#d--scenario-cheatsheet).
 

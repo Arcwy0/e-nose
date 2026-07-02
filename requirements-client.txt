@@ -1,0 +1,21 @@
+# Lightweight client runtime deps — fallback for when installing the wheel's
+# `[client]` extra isn't convenient (e.g. air-gapped mirror, pinned CI).
+#
+# These are exactly what enose/client/* imports. Deliberately NO fastapi,
+# uvicorn, scikit-learn (<1.6) or numpy (<2): those are server-only and are
+# what previously broke the Windows source build.
+#
+# Recommended Python: 3.11 or 3.12 (all wheels below are prebuilt for these).
+#
+#   pip install -r requirements-client.txt
+#   pip install --no-deps enose-3.1.0-py3-none-any.whl   # then add the package itself
+#
+# On headless Linux, swap opencv-python for opencv-python-headless.
+
+numpy>=1.24
+pandas>=2.0,<3.0
+pillow>=10.0
+requests>=2.31
+pyserial>=3.5
+matplotlib>=3.7
+opencv-python>=4.8

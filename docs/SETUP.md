@@ -60,27 +60,38 @@ source .venv/bin/activate
 .\.venv\Scripts\activate.bat
 
 pip install --upgrade pip
-pip install -e ".[classifier-extras]"          # server + classifier, CPU-only
+pip install -e ".[server,classifier-extras]"   # server + classifier, CPU-only
 # add vision extras if you want Florence-2 too:
-pip install -e ".[classifier-extras,vision]"
+pip install -e ".[server,classifier-extras,vision]"
 ```
+
+> **Just running the client (no server on this machine)?** Use the lightweight
+> client extra instead — it pulls none of the fastapi / scikit-learn stack:
+> `pip install -e ".[client]"`. See [CLIENT_WINDOWS_INSTALL.md](CLIENT_WINDOWS_INSTALL.md)
+> for the prebuilt-wheel path (no `git clone` needed).
 
 ### Option B — `conda`
 
 ```bash
 conda create -n enose python=3.11
 conda activate enose
-pip install -e ".[classifier-extras,vision]"
+pip install -e ".[server,classifier-extras,vision]"
 ```
 
 ### What each extra gives you
 
 | Extra | Packages | When you need it |
 |---|---|---|
-| *(base)* | fastapi, uvicorn, numpy, pandas, scikit-learn, matplotlib, requests, pyserial, opencv-python | Always |
+| *(base)* | numpy, pandas, pillow, requests | Always (light, always-wheel-available) |
+| `client` | pyserial, matplotlib, opencv-python | Robot-dog / colleague client (sensors, camera, live plot) |
+| `server` | fastapi, uvicorn, pydantic, python-multipart, numpy<2, scikit-learn<1.6, joblib, matplotlib | Run the FastAPI server + classifier |
 | `classifier-extras` | imbalanced-learn, xgboost | To use `BalancedRFClassifier` or `XGBTabularClassifier` |
 | `vision` | torch, transformers, einops, timm | Full Florence-2 mode |
 | `dev` | pytest, ruff | Development / CI |
+
+> The `numpy<2` / `scikit-learn<1.6` pins live only in the `server` extra, so a
+> `[client]` install never drags them in — that's what previously broke the
+> Windows wheel build for colleagues.
 
 Smoke-test the install:
 
