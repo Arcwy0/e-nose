@@ -26,7 +26,7 @@ async def root() -> dict:
     """Server status — mirrors the legacy root payload so existing clients keep working."""
     return {
         "message": "E-Nose Multimodal Server",
-        "version": "3.1.0",
+        "version": "3.1.1",
         "status": "running",
         "sensor_configuration": {
             "resistance_sensors": RESISTANCE_SENSORS,
@@ -65,7 +65,7 @@ async def health_check() -> dict:
     return {
         "status": "healthy",
         "timestamp": datetime.datetime.now().isoformat(),
-        "version": "3.1.0",
+        "version": "3.1.1",
         "features": {
             "total_features": 22,
             "resistance_sensors": len(RESISTANCE_SENSORS),

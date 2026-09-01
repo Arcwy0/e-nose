@@ -4,12 +4,12 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "enose"
-version = "3.1.0"
+version = "3.1.1"
 description = "Vision + smell multimodal understanding for a Unitree Go-1 e-nose rig"
 readme = { text = "E-Nose: Florence-2 vision + 22-feature smell classifier (FastAPI server + interactive client).", content-type = "text/plain" }
 requires-python = ">=3.9"
 authors = [{ name = "Sense" }]
-license = { text = "MIT" }
+license = "MIT"
 
 # Base deps are the light, universally-wheel-available packages both the client
 # and server share. Everything with a version pin that historically fails to
