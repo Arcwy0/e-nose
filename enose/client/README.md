@@ -28,6 +28,7 @@ python scripts/run_client.py --port_enose COM3 --port_UART COM4
 | `--samples` | `100` | Target samples per recording |
 | `--baud_enose` | `9600` | E-nose baud rate |
 | `--baud_UART` | `9600` | UART baud rate |
+| `--rlow` | `ENOSE_RLOW` or `1.0` | Load resistance used for raw ADC conversion |
 | `--offline` | off | Simulate all sensors |
 | `--live` | off | Skip the menu and open the live dashboard straight away |
 | `--live-rate` | `5.0` | Live publisher rate in Hz |
@@ -50,6 +51,7 @@ python scripts/run_client.py --port_enose COM3 --port_UART COM4
 | 7 | Visualizations + analysis | None (server call) |
 | 8 | Live sensor stream (plot + push to server) | E-nose + UART (or `--offline`) |
 | 9 | Replay a recorded session | A `.npz` session file |
+| 10 | Set RLOW calibration | None; affects subsequent hardware reads |
 
 ### Live streaming & session replay
 
@@ -90,7 +92,7 @@ E-nose board   →  USB/Serial  →  port_enose (sends 17 space-separated ADC co
 UART env board →  USB/Serial  →  port_UART  (sends 5 tab-separated values: T H CO2 H2S CH2O)
 ```
 
-ADC → resistance conversion happens client-side in `transform_sensor_values()` using constants from `enose/config.py` (RLOW, VCC, EG, VREF, COEF).
+ADC → resistance conversion happens client-side in `transform_sensor_values()` using RLOW plus constants from `enose/config.py` (VCC, EG, VREF, COEF). Set RLOW with `--rlow 10`, `ENOSE_RLOW=10` in the client process/container, or menu option **10**. Setting `ENOSE_RLOW` only on a separate server does not change remote client readings.
 
 ### Finding the serial device
 

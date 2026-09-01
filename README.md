@@ -163,6 +163,7 @@ docs/
 | `ENOSE_CLASSIFIER` | `balanced_rf` | Classifier backend: `balanced_rf` or `xgb` |
 | `SERVER_HOST` | `0.0.0.0` | Bind address |
 | `SERVER_PORT` | `8080` | Listen port |
+| `ENOSE_RLOW` | `1.0` | Client-side load resistance for ADC conversion; `--rlow` overrides it |
 
 ## License
 
@@ -182,6 +183,7 @@ Third-party components keep their own licenses:
 ## Further reading
 
 - [**Setup guide**](docs/SETUP.md) — clone → venv → download Florence-2 → first classification
+- [**PC migration guide**](docs/MIGRATION.md) — move code, weights, trained models, data, and configuration safely
 - [Chemist guide](docs/CHEMIST_GUIDE.md) — no Python needed
 - [Server + Client integration guide](docs/SERVER_CLIENT_GUIDE.md) — developer reference
 - [Classifier internals](enose/classifier/README.md)

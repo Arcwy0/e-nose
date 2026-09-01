@@ -6,6 +6,7 @@ when tuning the 22-feature setup or moving data around.
 
 from __future__ import annotations
 
+import os
 from typing import Dict, List, Tuple
 
 # ── Sensor lists ──────────────────────────────────────────────────────────────
@@ -15,7 +16,7 @@ ALL_SENSORS: List[str] = RESISTANCE_SENSORS + ENVIRONMENTAL_SENSORS  # 22 total
 N_FEATURES: int = len(ALL_SENSORS)
 
 # ── Raw-ADC → resistance transform (client-side, R1–R17 only) ────────────────
-RLOW: float = 1.0
+RLOW: float = float(os.environ.get("ENOSE_RLOW", "1.0"))
 VCC: float = 4.49
 EG: float = 1.02
 VREF: float = 1.227
@@ -44,6 +45,7 @@ ENV_DEFAULTS: Dict[str, float] = {
 DEFAULT_RECORDING_TIME: int = 60
 DEFAULT_TARGET_SAMPLES: int = 100
 DEFAULT_BAUD_RATE: int = 9600
+
 
 # ── Paths ────────────────────────────────────────────────────────────────────
 VLM_MODEL_PATH: str = "model/Florence-2-Large"

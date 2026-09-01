@@ -11,6 +11,7 @@ from enose.config import (
     DEFAULT_SERVER_URL,
     DEFAULT_TARGET_SAMPLES,
     N_FEATURES,
+    RLOW,
 )
 
 from .api import ServerAPI
@@ -32,6 +33,7 @@ MAIN MENU
 7. Generate visualizations + analysis
 8. Live sensor stream (plot + push to server)
 9. Replay a recorded session
+10. Set RLOW calibration
 0. Exit
 ================================================================================
 """
@@ -47,6 +49,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--samples", type=int, default=DEFAULT_TARGET_SAMPLES, help="Target samples")
     p.add_argument("--baud_enose", type=int, default=DEFAULT_BAUD_RATE)
     p.add_argument("--baud_UART", type=int, default=DEFAULT_BAUD_RATE)
+    p.add_argument("--rlow", type=float, default=RLOW,
+                   help="Load resistance for ADC conversion (default: ENOSE_RLOW or 1.0)")
     p.add_argument("--offline", action="store_true", help="Simulate sensors")
     p.add_argument(
         "--live",
@@ -108,6 +112,20 @@ def _launch_replay(args) -> None:
         print(f"Replay failed: {e}")
 
 
+def _change_rlow(sensor: ENoseSensor) -> None:
+    """Menu 10 — change calibration without restarting the client."""
+    raw = input(f"New RLOW (current {sensor.rlow:g}, > 0; blank to cancel): ").strip()
+    if not raw:
+        print("Unchanged.")
+        return
+    try:
+        sensor.set_rlow(float(raw))
+    except (TypeError, ValueError) as exc:
+        print(f"Invalid RLOW: {exc}")
+        return
+    print(f"RLOW set to {sensor.rlow:g}. It applies to subsequent hardware readings.")
+
+
 def main() -> None:
     args = build_parser().parse_args()
     mode = "OFFLINE" if args.offline else "HARDWARE"
@@ -119,7 +137,13 @@ def main() -> None:
     server_api = ServerAPI(args.server)
     webcam = WebcamHandler(args.camera)
     port_tuple = (args.port_enose, args.port_UART) if (args.port_enose or args.port_UART) else None
-    sensor = ENoseSensor(port_tuple, args.baud_enose, args.baud_UART, args.offline)
+    try:
+        sensor = ENoseSensor(
+            port_tuple, args.baud_enose, args.baud_UART, args.offline, rlow=args.rlow
+        )
+    except ValueError as exc:
+        print(f"Invalid RLOW: {exc}")
+        return
 
     print("Testing server connection…")
     info, err = server_api.test_connection()
@@ -162,8 +186,8 @@ def main() -> None:
     try:
         while True:
             print(MENU)
-            print(f"Recording: {args.samples} samples in {args.time}s ({mode})")
-            choice = input("Select (0-9): ").strip()
+            print(f"Recording: {args.samples} samples in {args.time}s ({mode}); RLOW={sensor.rlow:g}")
+            choice = input("Select (0-10): ").strip()
             if choice == "1":
                 pipeline.run_training_cycle()
             elif choice == "2":
@@ -182,10 +206,12 @@ def main() -> None:
                 _launch_live(args, sensor)
             elif choice == "9":
                 _launch_replay(args)
+            elif choice == "10":
+                _change_rlow(sensor)
             elif choice == "0":
                 break
             else:
-                print("Invalid — select 0-9")
+                print("Invalid — select 0-10")
             time.sleep(1)
     except KeyboardInterrupt:
         print("\nInterrupted")

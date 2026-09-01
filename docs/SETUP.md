@@ -7,6 +7,8 @@ works unchanged. If you want the **full multimodal system**, do all steps.
 A companion guide for non-programmers using the browser UI lives in
 [`CHEMIST_GUIDE.md`](CHEMIST_GUIDE.md). The server ↔ client deployment
 reference is in [`SERVER_CLIENT_GUIDE.md`](SERVER_CLIENT_GUIDE.md).
+If you are moving an existing installation—including local models and data—to
+another machine, follow [`MIGRATION.md`](MIGRATION.md) as well.
 
 ---
 

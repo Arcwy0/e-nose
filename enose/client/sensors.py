@@ -7,6 +7,7 @@ a separate UART already in engineering units and are sanitized to plausible rang
 
 from __future__ import annotations
 
+import math
 import queue
 import random
 import threading
@@ -66,15 +67,24 @@ def sanitize_environmentals_inplace(d: dict) -> None:
         d[k] = float(v)
 
 
-def transform_sensor_values(values: List[float]) -> List[float]:
+def validate_rlow(value: float) -> float:
+    """Return a valid load resistance or raise a user-facing ValueError."""
+    value = float(value)
+    if not math.isfinite(value) or value <= 0:
+        raise ValueError("RLOW must be a finite number greater than zero")
+    return value
+
+
+def transform_sensor_values(values: List[float], rlow: float = RLOW) -> List[float]:
     """ADC → resistance for R1–R17 only. Non-positive counts map to 0."""
+    rlow = validate_rlow(rlow)
     transformed: List[float] = []
     for i, value in enumerate(values[:17]):
         if value == 0.0:
             transformed.append(0.0)
             continue
         try:
-            r = (RLOW * COEF * VCC * EG / (VREF * value)) - RLOW
+            r = (rlow * COEF * VCC * EG / (VREF * value)) - rlow
             transformed.append(max(0.0, r))
         except ZeroDivisionError:
             print(f"Warning: div-by-zero for R{i + 1}")
@@ -94,11 +104,13 @@ class ENoseSensor:
         baud_rate_enose: int = DEFAULT_BAUD_RATE,
         baud_rate_UART: int = DEFAULT_BAUD_RATE,
         offline_mode: bool = False,
+        rlow: float = RLOW,
     ) -> None:
         self.port = port
         self.baud_rate_enose = baud_rate_enose
         self.baud_rate_UART = baud_rate_UART
         self.offline_mode = offline_mode
+        self.rlow = validate_rlow(rlow)
         self.serial_conn_enose = None
         self.serial_conn_UART = None
         self._is_recording = False
@@ -108,6 +120,10 @@ class ENoseSensor:
         self._recording_thread: Optional[threading.Thread] = None
         self._current_smell_name = "air"
         self._base_environmental = dict(ENV_DEFAULTS)
+
+    def set_rlow(self, value: float) -> None:
+        """Update the ADC conversion calibration for subsequent hardware reads."""
+        self.rlow = validate_rlow(value)
 
     # ── Offline simulation ─────────────────────────────────────────────────
     def generate_realistic_sensor_data(self, smell_name: str = "air") -> Dict[str, float]:
@@ -262,7 +278,7 @@ class ENoseSensor:
                 print(f"Insufficient UART values: {len(raw_uart)}/5")
                 return None
 
-            transformed = transform_sensor_values(raw_values)
+            transformed = transform_sensor_values(raw_values, self.rlow)
             all_values = transformed + raw_uart[:5]
             result = dict(zip(ALL_SENSORS, all_values))
             sanitize_environmentals_inplace(result)
