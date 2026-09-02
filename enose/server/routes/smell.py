@@ -8,7 +8,7 @@ from fastapi import APIRouter, HTTPException
 
 from fastapi.responses import JSONResponse
 
-from enose.config import ALL_SENSORS, ENVIRONMENTAL_SENSORS, RESISTANCE_SENSORS
+from enose.config import ALL_SENSORS, ENV_DEFAULTS, ENVIRONMENTAL_SENSORS, RESISTANCE_SENSORS
 
 from .. import state
 from ..jsonsafe import json_safe
@@ -131,6 +131,12 @@ async def test_console_input(data: ConsoleSensorData) -> Dict[str, Any]:
     if len(values) == 22:
         for i, name in enumerate(ENVIRONMENTAL_SENSORS):
             sensor_dict[name] = values[17 + i]
+    else:
+        # Keep the response payload and classifier input complete for R-only
+        # requests.  Previously preprocessing filled these values only in its
+        # private DataFrame, then response construction indexed the original
+        # dict and raised KeyError("T") after prediction had succeeded.
+        sensor_dict.update(ENV_DEFAULTS)
 
     # Raw dict → predict; predict() re-runs process_sensor_data internally.
     prediction = clf.predict(sensor_dict)[0]
