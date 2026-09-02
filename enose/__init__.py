@@ -11,4 +11,4 @@ Package layout:
     utils         - CSV I/O, logging helpers
 """
 
-__version__ = "3.1.1"
+__version__ = "3.1.2"

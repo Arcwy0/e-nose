@@ -60,7 +60,7 @@ async def lifespan(app: FastAPI):
     """FastAPI lifespan: run startup, yield, then cleanup on shutdown."""
     await startup_logic()
     print("=" * 60)
-    print("E-Nose Multimodal Server v3.1.1 ready on http://0.0.0.0:8080")
+    print("E-Nose Multimodal Server v3.1.2 ready on http://0.0.0.0:8080")
     print("Docs at /docs")
     print("=" * 60)
     yield
@@ -72,7 +72,7 @@ def create_app() -> FastAPI:
     app = FastAPI(
         title="E-Nose Multimodal Server",
         description="Florence-2 vision + 22-feature smell classification",
-        version="3.1.1",
+        version="3.1.2",
         lifespan=lifespan,
     )
 
