@@ -1,4 +1,4 @@
-"""E-nose sensor handler: dual-serial I/O, ADC→resistance transform, offline simulation.
+"""E-nose sensor handler: required e-nose UART, optional env UART, and simulation.
 
 Raw e-nose UART gives ADC counts for R1–R17; we convert each count to resistance via
 `(RLOW·COEF·VCC·EG)/(VREF·v) - RLOW`. Environmentals (T/H/CO2/H2S/CH2O) arrive from
@@ -96,7 +96,7 @@ def transform_sensor_values(values: List[float], rlow: float = RLOW) -> List[flo
 
 
 class ENoseSensor:
-    """Dual-serial sensor handler with threaded recording and offline simulation."""
+    """Sensor handler with threaded recording and optional environment input."""
 
     def __init__(
         self,
@@ -172,7 +172,7 @@ class ENoseSensor:
         return ports
 
     def select_port(self) -> Tuple[Optional[str], Optional[str]]:
-        """Interactively pick e-nose + UART ports. Returns (enose_dev, uart_dev)."""
+        """Pick the required e-nose port and optional environmental UART."""
         if self.offline_mode:
             return ("OFFLINE_ENOSE", "OFFLINE_UART")
 
@@ -184,16 +184,22 @@ class ENoseSensor:
         while True:
             try:
                 sel_enose = input(f"Select e-nose port (1-{len(ports)} or device): ").strip()
-                sel_uart = input(f"Select UART port (1-{len(ports)} or device): ").strip()
-                if not sel_enose or not sel_uart:
+                sel_uart = input(
+                    f"Select environmental UART (1-{len(ports)}, device, or blank for none): "
+                ).strip()
+                if not sel_enose:
                     continue
                 try:
                     ei = int(sel_enose) - 1
+                    if not 0 <= ei < len(devices):
+                        raise ValueError
+                    if not sel_uart:
+                        return devices[ei], None
                     ui = int(sel_uart) - 1
-                    if 0 <= ei < len(devices) and 0 <= ui < len(devices):
+                    if 0 <= ui < len(devices):
                         return devices[ei], devices[ui]
                 except ValueError:
-                    if sel_enose in devices and sel_uart in devices:
+                    if sel_enose in devices and (not sel_uart or sel_uart in devices):
                         return sel_enose, sel_uart
                 print("Invalid selection.")
             except KeyboardInterrupt:
@@ -201,7 +207,7 @@ class ENoseSensor:
                 return None, None
 
     def connect(self) -> bool:
-        """Open both serial connections (or simulate)."""
+        """Open the e-nose and, when configured, the environmental UART."""
         if self.offline_mode:
             self.serial_conn_enose = "SIMULATED_ENOSE"
             self.serial_conn_UART = "SIMULATED_UART"
@@ -210,15 +216,13 @@ class ENoseSensor:
 
         if not self.port:
             self.port = self.select_port()
-            if not self.port or len(self.port) != 2 or not self.port[0] or not self.port[1]:
+            if not self.port or len(self.port) != 2 or not self.port[0]:
                 return False
 
         try:
             with self._lock:
-                if (self.serial_conn_enose and self.serial_conn_UART
-                        and getattr(self.serial_conn_enose, "is_open", False)
-                        and getattr(self.serial_conn_UART, "is_open", False)):
-                    print(f"Already connected to {self.port[0]} and {self.port[1]}")
+                if self.serial_conn_enose and getattr(self.serial_conn_enose, "is_open", False):
+                    print(f"Already connected to e-nose {self.port[0]}")
                     return True
 
                 try:
@@ -227,21 +231,34 @@ class ENoseSensor:
                     print(f"E-nose connect failed on {self.port[0]}: {e}")
                     return False
 
-                try:
-                    self.serial_conn_UART = serial.Serial(self.port[1], self.baud_rate_UART, timeout=1)
-                except Exception as e:
-                    print(f"UART connect failed on {self.port[1]}: {e}")
-                    self.serial_conn_enose.close()
-                    return False
+                if self.port[1]:
+                    try:
+                        self.serial_conn_UART = serial.Serial(
+                            self.port[1], self.baud_rate_UART, timeout=1
+                        )
+                    except Exception as e:
+                        print(f"UART connect failed on {self.port[1]}: {e}")
+                        self.serial_conn_enose.close()
+                        return False
+                else:
+                    self.serial_conn_UART = None
+                    print("Environmental UART disabled; using configured default values")
 
                 time.sleep(1)
                 if self.serial_conn_enose.in_waiting:
                     self.serial_conn_enose.read(self.serial_conn_enose.in_waiting)
-                if self.serial_conn_UART.in_waiting:
+                if self.serial_conn_UART and self.serial_conn_UART.in_waiting:
                     self.serial_conn_UART.read(self.serial_conn_UART.in_waiting)
 
-                print(f"Connected: e-nose @ {self.port[0]} ({self.baud_rate_enose}), "
-                      f"UART @ {self.port[1]} ({self.baud_rate_UART})")
+                env_status = (
+                    f"UART @ {self.port[1]} ({self.baud_rate_UART})"
+                    if self.port[1]
+                    else "environment defaults"
+                )
+                print(
+                    f"Connected: e-nose @ {self.port[0]} ({self.baud_rate_enose}), "
+                    f"{env_status}"
+                )
                 return True
         except Exception as e:
             print(f"Connection error: {e}")
@@ -265,18 +282,23 @@ class ENoseSensor:
             self.serial_conn_UART = None
 
     # ── Reading ────────────────────────────────────────────────────────────
-    def _parse_and_transform_line(self, line: str, line_uart: str) -> Optional[Dict[str, float]]:
-        """Parse one e-nose line + one UART line → 22-feature dict."""
+    def _parse_and_transform_line(
+        self, line: str, line_uart: Optional[str] = None
+    ) -> Optional[Dict[str, float]]:
+        """Parse an e-nose line and optional UART line into a canonical sample."""
         try:
             raw_values = [float(x) for x in line.strip().split()]
             if len(raw_values) < 17:
                 print(f"Insufficient e-nose values: {len(raw_values)}/17")
                 return None
 
-            raw_uart = [float(str(i).strip()) for i in line_uart.strip().split("\t")]
-            if len(raw_uart) < 5:
-                print(f"Insufficient UART values: {len(raw_uart)}/5")
-                return None
+            if line_uart is None:
+                raw_uart = [ENV_DEFAULTS[name] for name in ENVIRONMENTAL_SENSORS]
+            else:
+                raw_uart = [float(str(i).strip()) for i in line_uart.strip().split("\t")]
+                if len(raw_uart) < 5:
+                    print(f"Insufficient UART values: {len(raw_uart)}/5")
+                    return None
 
             transformed = transform_sensor_values(raw_values, self.rlow)
             all_values = transformed + raw_uart[:5]
@@ -294,8 +316,8 @@ class ENoseSensor:
 
         with self._lock:
             ce, cu = self.serial_conn_enose, self.serial_conn_UART
-            if not (ce and cu and getattr(ce, "is_open", False) and getattr(cu, "is_open", False)):
-                print("Serial connections not available")
+            if not (ce and getattr(ce, "is_open", False)):
+                print("E-nose serial connection not available")
                 return None
 
             try:
@@ -303,14 +325,14 @@ class ENoseSensor:
                     time.sleep(0.1)
                     if ce.in_waiting == 0:
                         return None
-                if cu.in_waiting == 0:
+                if cu is not None and cu.in_waiting == 0:
                     time.sleep(0.1)
                     if cu.in_waiting == 0:
                         return None
 
                 line_e = ce.readline().decode("utf-8")
-                line_u = cu.readline().decode("utf-8")
-                if not line_e.strip() or not line_u.strip():
+                line_u = cu.readline().decode("utf-8") if cu is not None else None
+                if not line_e.strip() or (line_u is not None and not line_u.strip()):
                     return None
                 return self._parse_and_transform_line(line_e, line_u)
             except Exception as e:
@@ -376,12 +398,9 @@ class ENoseSensor:
             return True
 
         with self._lock:
-            ce, cu = self.serial_conn_enose, self.serial_conn_UART
+            ce = self.serial_conn_enose
             if not (ce and getattr(ce, "is_open", False)):
                 print("E-nose not connected")
-                return False
-            if not (cu and getattr(cu, "is_open", False)):
-                print("UART not connected")
                 return False
             if self._is_recording:
                 print("Recording already running")

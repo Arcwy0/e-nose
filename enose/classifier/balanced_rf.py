@@ -480,16 +480,26 @@ class BalancedRFClassifier(SmellClassifierBase):
             and len(pd.Series(groups).unique()) >= 2
         ):
             gss = GroupShuffleSplit(
-                n_splits=1,
+                n_splits=64,
                 test_size=test_size,
                 random_state=self.config.random_state,
             )
-            train_idx, test_idx = next(gss.split(X_df, y_series, groups=groups))
-            return (
-                X_df.iloc[train_idx].reset_index(drop=True),
-                X_df.iloc[test_idx].reset_index(drop=True),
-                y_series.iloc[train_idx].reset_index(drop=True),
-                y_series.iloc[test_idx].reset_index(drop=True),
+            all_labels = set(y_series.astype(str))
+            for train_idx, test_idx in gss.split(X_df, y_series, groups=groups):
+                train_labels = set(y_series.iloc[train_idx].astype(str))
+                test_labels = set(y_series.iloc[test_idx].astype(str))
+                if train_labels == all_labels and test_labels == all_labels:
+                    print("[train] using group-disjoint split with all classes in train and test")
+                    return (
+                        X_df.iloc[train_idx].reset_index(drop=True),
+                        X_df.iloc[test_idx].reset_index(drop=True),
+                        y_series.iloc[train_idx].reset_index(drop=True),
+                        y_series.iloc[test_idx].reset_index(drop=True),
+                    )
+            print(
+                "[train] no group-disjoint split contains every class on both sides; "
+                "falling back to a stratified row split for complete diagnostics "
+                "(metrics may be optimistic for time-series data)"
             )
 
         X_use = X_df.reset_index(drop=True)
@@ -517,10 +527,18 @@ class BalancedRFClassifier(SmellClassifierBase):
         if stratify is None:
             print("[train] skipping stratification — at least one class has <2 samples")
 
+        split_size = test_size
+        if stratify is not None:
+            # sklearn requires at least one test row per class. This also makes
+            # the confusion matrix cover every learned class for small datasets.
+            n_classes = int(counts.size)
+            requested = int(np.ceil(float(test_size) * len(y_use)))
+            split_size = min(max(requested, n_classes), len(y_use) - n_classes)
+
         return train_test_split(
             X_use,
             y_use,
-            test_size=test_size,
+            test_size=split_size,
             random_state=self.config.random_state,
             stratify=stratify,
         )
@@ -534,7 +552,14 @@ class BalancedRFClassifier(SmellClassifierBase):
         ``confusion_matrix_``, ``confusion_labels_``) so they can be surfaced
         via the API / UI without re-running the test set.
         """
-        labels = sorted(pd.unique(np.concatenate([np.asarray(y_test), np.asarray(y_pred)])))
+        # Always render the complete learned label set. If a very small dataset
+        # cannot place a class in the holdout, its row has support 0 instead of
+        # silently disappearing from the confusion matrix.
+        labels = sorted(
+            set(str(v) for v in self.classes_)
+            | set(str(v) for v in np.asarray(y_test))
+            | set(str(v) for v in np.asarray(y_pred))
+        )
         cm = confusion_matrix(y_test, y_pred, labels=labels)
         report_txt = classification_report(
             y_test, y_pred, labels=labels, digits=4, zero_division=0

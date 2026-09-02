@@ -43,7 +43,10 @@ def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description="E-Nose vision-smell training client")
     p.add_argument("--server", default=DEFAULT_SERVER_URL, help="Server URL")
     p.add_argument("--port_enose", help="E-nose serial port")
-    p.add_argument("--port_UART", help="UART serial port")
+    p.add_argument(
+        "--port_UART",
+        help="Optional environmental UART; omit to use T/H/CO2/H2S/CH2O defaults",
+    )
     p.add_argument("--camera", type=int, default=0, help="Camera index")
     p.add_argument("--time", type=int, default=DEFAULT_RECORDING_TIME, help="Recording seconds")
     p.add_argument("--samples", type=int, default=DEFAULT_TARGET_SAMPLES, help="Target samples")

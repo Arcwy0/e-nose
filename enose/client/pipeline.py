@@ -296,8 +296,13 @@ class TrainingPipeline:
                 except ValueError:
                     n_aug = 5
             lowercase = input("Lowercase labels? (y/n, default y): ").lower().strip() != "n"
+            merge_history = input(
+                "Merge with historical data? (y/n, default y; n replaces model): "
+            ).lower().strip() != "n"
 
-            result, err = self.server_api.learn_from_csv(csv_path, target, use_aug, n_aug, lowercase)
+            result, err = self.server_api.learn_from_csv(
+                csv_path, target, use_aug, n_aug, lowercase, merge_history
+            )
             if err:
                 print(f"CSV learning failed: {err}")
                 return False

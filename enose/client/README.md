@@ -9,7 +9,10 @@ python scripts/run_client.py --offline --server http://localhost:8080
 # Hardware, auto port-select:
 python scripts/run_client.py --server http://SERVER_IP:8080
 
-# Hardware, explicit ports (Linux):
+# Hardware, resistance sensors only (environment values use defaults):
+python scripts/run_client.py --port_enose /dev/ttyUSB0
+
+# Hardware, resistance + environmental UART (Linux):
 python scripts/run_client.py --port_enose /dev/ttyUSB0 --port_UART /dev/ttyUSB1
 
 # Hardware, explicit ports (Windows):
@@ -22,7 +25,7 @@ python scripts/run_client.py --port_enose COM3 --port_UART COM4
 |---|---|---|
 | `--server` | `http://localhost:8080` | Server URL |
 | `--port_enose` | (interactive) | E-nose serial port |
-| `--port_UART` | (interactive) | UART environmental port |
+| `--port_UART` | omitted | Optional environmental UART; defaults are used when absent |
 | `--camera` | `0` | Camera index |
 | `--time` | `60` | Recording duration in seconds |
 | `--samples` | `100` | Target samples per recording |
@@ -93,6 +96,11 @@ UART env board →  USB/Serial  →  port_UART  (sends 5 tab-separated values: T
 ```
 
 ADC → resistance conversion happens client-side in `transform_sensor_values()` using RLOW plus constants from `enose/config.py` (VCC, EG, VREF, COEF). Set RLOW with `--rlow 10`, `ENOSE_RLOW=10` in the client process/container, or menu option **10**. Setting `ENOSE_RLOW` only on a separate server does not change remote client readings.
+
+The environmental UART is optional. With only `--port_enose`, every emitted
+sample still has the canonical 22-key transport shape, using defaults
+`T=21`, `H=49`, `CO2=400`, `H2S=0`, `CH2O=5`. Current 17-feature models drop
+those five values before fitting and prediction.
 
 ### Finding the serial device
 

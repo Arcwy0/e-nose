@@ -121,4 +121,4 @@ See [`docs/SERVER_CLIENT_GUIDE.md`](../../docs/SERVER_CLIENT_GUIDE.md) for the c
 | `SensorData` | `/smell/classify` | 22 float fields (R1–R17, T, H, CO2, H2S, CH2O) |
 | `ConsoleSensorData` | `/smell/test_console` | `values: str` (comma-separated) |
 | `OnlineLearningData` | `/smell/online_learning` | `sensor_data: list[dict]`, `labels: list[str]` |
-| `CSVLearningData` | `/smell/learn_from_csv` | `csv_data`, `target_column`, augmentation params |
+| `CSVLearningData` | `/smell/learn_from_csv` | `csv_data`, `target_column`, augmentation params, `merge_history` (default `true`) |

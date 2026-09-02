@@ -202,14 +202,15 @@ def retrain_with_all_data(
     new_y: pd.Series,
     use_augmentation: bool = True,
     n_augmentations: int = 1,
-    combined_save_path: str = "data/smell_training_data_22features.csv",
+    combined_save_path: str = TRAINING_DATA_PATH,
     model_out_dir: str = "trained_models",
     groups: Optional[pd.Series] = None,
     balance_majority: bool = True,
     per_class_cap_multiplier: Optional[float] = None,
     drop_sensor_off_air: Optional[bool] = None,
+    merge_history: bool = True,
 ) -> Tuple[bool, float, Optional[BalancedRFClassifier]]:
-    """Merge new samples with historical data, train a fresh classifier, save everything.
+    """Train fresh, optionally merging prior history, and save canonical history.
 
     Returns (ok, balanced_accuracy, new_classifier). The new classifier is returned
     so the caller (server) can swap it into its global reference atomically.
@@ -237,7 +238,7 @@ def retrain_with_all_data(
             getattr(cfg, "drop_sensor_off_air_rows", True)
         ) if cfg else True
 
-    history = _load_history(classifier)
+    history = _load_history(classifier) if merge_history else None
 
     new_frame = new_X.copy()
     new_frame["smell_label"] = pd.Series(new_y).astype(str).values
@@ -247,7 +248,8 @@ def retrain_with_all_data(
         combined = pd.concat([history, new_frame], ignore_index=True)
     else:
         combined = new_frame
-        print("[training] no history found — training on new batch only")
+        reason = "replace mode" if not merge_history else "no history found"
+        print(f"[training] {reason} — training on new batch only")
 
     # drop rows with unusable labels
     mask = combined["smell_label"].notna() & (combined["smell_label"] != "") & (combined["smell_label"] != "unknown")

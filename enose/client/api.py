@@ -216,6 +216,7 @@ class ServerAPI:
         use_augmentation: bool = True,
         n_augmentations: int = 5,
         lowercase_labels: bool = True,
+        merge_history: bool = True,
     ) -> Result:
         try:
             df = pd.read_csv(csv_file_path)
@@ -238,8 +239,10 @@ class ServerAPI:
                 "n_augmentations": n_augmentations,
                 "noise_std": 0.0015,
                 "lowercase_labels": lowercase_labels,
+                "merge_history": merge_history,
             }
-            print(f"Sending CSV learning request: aug={use_augmentation}(n={n_augmentations})")
+            mode = "merge history" if merge_history else "replace history"
+            print(f"Sending CSV learning request: {mode}, aug={use_augmentation}(n={n_augmentations})")
             r = requests.post(
                 f"{self.base_url}/smell/learn_from_csv",
                 json=payload, timeout=120,

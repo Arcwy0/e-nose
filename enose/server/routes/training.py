@@ -27,7 +27,7 @@ from enose.config import (
 from enose.vision.florence import process_image_with_vlm
 
 from .. import state
-from ..model_loader import reload_smell_classifier, save_training_data
+from ..model_loader import reload_smell_classifier
 from ..schemas import CommitProvenance, CSVLearningData, OnlineLearningData
 
 router = APIRouter()
@@ -122,7 +122,6 @@ async def online_learning(data: OnlineLearningData) -> Dict[str, Any]:
             )
 
     try:
-        save_training_data(data.sensor_data, data.labels)
         df = clf.process_sensor_data(data.sensor_data)
         new_labels = pd.Series(data.labels)
         new_classes: set = set()
@@ -201,7 +200,7 @@ async def online_learning(data: OnlineLearningData) -> Dict[str, Any]:
 
 @router.post("/smell/learn_from_csv")
 async def learn_from_csv(data: CSVLearningData) -> Dict[str, Any]:
-    """Batch training from a CSV string. Same retrain-on-new-class logic as online learning."""
+    """Train from CSV, merging history by default or replacing it explicitly."""
     clf = state.require_classifier()
 
     if not data.csv_data:
@@ -224,48 +223,21 @@ async def learn_from_csv(data: CSVLearningData) -> Dict[str, Any]:
         if data.lowercase_labels:
             y = y.str.lower()
         X = _fill_missing_sensors(X)
-
-        new_classes: set = set()
+        existing_classes = set(clf.classes_) if clf.is_fitted else set()
+        new_classes = set(y.unique()) - existing_classes
         mismatch = False
 
-        if clf.is_fitted:
-            new_classes, mismatch = _detect_new_classes_or_mismatch(clf, y.unique())
-            if new_classes or mismatch:
-                print(f"[learn_from_csv] retraining — new_classes={new_classes}, mismatch={mismatch}")
-                ok, accuracy, fresh = retrain_with_all_data(
-                    clf, X, y,
-                    use_augmentation=data.use_augmentation,
-                    n_augmentations=data.n_augmentations,
-                )
-                if not ok or fresh is None:
-                    raise HTTPException(status_code=500, detail="Retraining failed")
-                state.set_classifier(fresh)
-                clf = fresh
-                update_type = "retrain_for_consistency"
-            else:
-                clf.online_update(
-                    X, y,
-                    use_augmentation=data.use_augmentation,
-                    n_augmentations=max(1, data.n_augmentations // 2),
-                )
-                update_type = "online_update"
-                accuracy = clf.training_history["accuracy"][-1] if clf.training_history["accuracy"] else 0.0
-        else:
-            # Route initial training through retrain_with_all_data so the
-            # majority-class cap + group-aware split apply here too. Without
-            # this, the first CSV load would train on the raw (air-dominated)
-            # distribution and every subsequent call would retrain on a mix
-            # that was never balanced.
-            ok, accuracy, fresh = retrain_with_all_data(
-                clf, X, y,
-                use_augmentation=data.use_augmentation,
-                n_augmentations=data.n_augmentations,
-            )
-            if not ok or fresh is None:
-                raise HTTPException(status_code=500, detail="Initial training failed")
-            state.set_classifier(fresh)
-            clf = fresh
-            update_type = "initial_training"
+        ok, accuracy, fresh = retrain_with_all_data(
+            clf, X, y,
+            use_augmentation=data.use_augmentation,
+            n_augmentations=data.n_augmentations,
+            merge_history=data.merge_history,
+        )
+        if not ok or fresh is None:
+            raise HTTPException(status_code=500, detail="Training failed")
+        state.set_classifier(fresh)
+        clf = fresh
+        update_type = "historical_retrain" if data.merge_history else "replacement_training"
 
         model_path = clf.save_model(TRAINED_MODELS_DIR)
         reloaded = reload_smell_classifier()
@@ -296,6 +268,7 @@ async def learn_from_csv(data: CSVLearningData) -> Dict[str, Any]:
             "model_reloaded": reloaded,
             "new_classes_detected": len(new_classes) > 0,
             "inconsistency_fixed": mismatch,
+            "merge_history": data.merge_history,
         }
     except HTTPException:
         raise

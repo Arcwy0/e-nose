@@ -81,9 +81,12 @@ class CSVLearningData(BaseModel):
     n_augmentations: int = 5
     noise_std: float = 0.0015
     lowercase_labels: bool = True
+    # True is the Idea-1 default: retain prior classes/samples and add this CSV.
+    # False trains a fresh model and replaces the canonical training history.
+    merge_history: bool = True
 
 
 class ConsoleSensorData(BaseModel):
-    """Comma-separated 22 numbers, R1,...,R17,T,H,CO2,H2S,CH2O."""
+    """Comma-separated 17 resistance values, optionally followed by 5 env values."""
 
     values: str

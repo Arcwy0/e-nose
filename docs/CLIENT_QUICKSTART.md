@@ -166,6 +166,15 @@ ls /dev/ttyUSB*                      # usually /dev/ttyUSB0 + /dev/ttyUSB1
 
 **Run:**
 
+For R1–R17 only (no environmental UART):
+
+```bash
+python scripts/run_client.py --port_enose /dev/ttyUSB0 --server <SERVER_URL>
+```
+
+The client supplies neutral environmental defaults; a 17-feature model ignores
+them. To use the environmental board as well:
+
 ```bash
 # Linux
 python scripts/run_client.py \
@@ -257,6 +266,11 @@ Reports label distribution, confidence stats, and how today's server predictions
 Two equivalent ways:
 
 **Browser (easiest):** the **Train** tab at `<SERVER_URL>/ui` — drag a CSV in, click Train.
+
+Only `R1`–`R17` plus the selected label column are required. Environmental
+columns are optional. **Merge with historical training data** is checked by
+default for Idea 1. Uncheck it only when you intentionally want this CSV to
+replace the model and canonical training history; the UI asks for confirmation.
 
 **Python client:** menu **5** ("Learn from CSV"). It prompts for a path and uploads the file.
 

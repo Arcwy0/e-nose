@@ -118,7 +118,7 @@ textarea{resize:vertical;font-family:monospace;font-size:.85rem}
   <div id="tab-classify">
     <div class="card">
       <h2>Enter one sensor reading</h2>
-      <p class="hint">Fill in individual fields <em>or</em> paste all 22 numbers in the box below. R1&ndash;R17 are resistance values; T, H, CO2, H2S, CH2O are environmental.</p>
+      <p class="hint">Fill in individual fields or paste either 17 resistance values, or all 22 values. Environmental values are optional for a 17-feature model.</p>
 
       <div class="slbl">&#128309; Resistance sensors R1 &ndash; R17</div>
       <div class="sgrid" id="rgrid"></div>
@@ -126,10 +126,10 @@ textarea{resize:vertical;font-family:monospace;font-size:.85rem}
       <div class="slbl">&#128994; Environmental sensors</div>
       <div class="sgrid" id="egrid"></div>
 
-      <div class="div">or paste all 22 values at once</div>
+      <div class="div">or paste 17 resistance values (or all 22 values)</div>
 
       <div style="margin-bottom:.75rem">
-        <label for="qp">22 comma-separated values &mdash; R1, R2, &hellip;, R17, T, H, CO2, H2S, CH2O</label>
+        <label for="qp">17 or 22 comma-separated values &mdash; R1, &hellip;, R17 [, T, H, CO2, H2S, CH2O]</label>
         <textarea id="qp" rows="2" placeholder="e.g. 15.2, 8.3, 12.1, 3.4, 18.9, 11.2, 9.8, 6.7, 14.3, 10.5, 13.2, 7.8, 5.6, 12.4, 8.9, 6.3, 11.7, 21.0, 49.0, 400, 0.0, 5.0"></textarea>
       </div>
 
@@ -158,7 +158,7 @@ textarea{resize:vertical;font-family:monospace;font-size:.85rem}
   <div id="tab-train" class="hidden">
     <div class="card">
       <h2>Train from CSV data</h2>
-      <p class="hint">Upload a CSV file where each row is one sensor reading. The file must include columns <strong>R1&ndash;R17</strong>, <strong>T, H, CO2, H2S, CH2O</strong>, and a label column (default name: <em>Gas name</em>).</p>
+      <p class="hint">Each row must include <strong>R1&ndash;R17</strong> and a label column (default <em>Gas name</em>). T, H, CO2, H2S, and CH2O are optional and receive defaults when absent.</p>
 
       <div style="margin-bottom:.75rem">
         <label>Upload CSV file <span style="font-weight:400;color:var(--muted)">(or paste text below)</span></label>
@@ -186,6 +186,10 @@ textarea{resize:vertical;font-family:monospace;font-size:.85rem}
       </label>
       <label style="display:flex;align-items:center;gap:.5rem;font-size:.85rem;cursor:pointer;margin-bottom:.75rem">
         <input type="checkbox" id="lc" checked style="width:auto"> Convert labels to lowercase automatically
+      </label>
+      <label style="display:flex;align-items:flex-start;gap:.5rem;font-size:.85rem;cursor:pointer;margin-bottom:.75rem">
+        <input type="checkbox" id="mh" checked style="width:auto;margin-top:.15rem">
+        <span><strong>Merge with historical training data</strong> (Idea 1 default). Uncheck to replace the model and canonical history with only this CSV.</span>
       </label>
 
       <div class="brow">
@@ -295,8 +299,9 @@ function g2p(){
 }
 function p2g(){
   const parts=document.getElementById('qp').value.split(',').map(x=>x.trim());
-  if(parts.length!==22)return;
-  ALL.forEach((n,i)=>{const e=document.getElementById('s_'+n);if(e)e.value=parts[i]||'';});
+  if(parts.length!==17&&parts.length!==22)return;
+  const full=parts.length===17?parts.concat(['21','49','400','0','5']):parts;
+  ALL.forEach((n,i)=>{const e=document.getElementById('s_'+n);if(e)e.value=full[i]||'';});
 }
 document.addEventListener('DOMContentLoaded',()=>{mkGrid();document.getElementById('qp').addEventListener('input',p2g);renderTryButtons();refreshStatus();loadClassExamples();});
 
@@ -311,7 +316,7 @@ function showTab(t){
 
 function vals(){
   const p=document.getElementById('qp').value.trim();
-  if(p){const a=p.split(',').map(x=>parseFloat(x.trim()));if(a.length===22&&a.every(x=>!isNaN(x)))return a;}
+  if(p){const a=p.split(',').map(x=>parseFloat(x.trim()));if((a.length===17||a.length===22)&&a.every(x=>!isNaN(x)))return a;}
   return ALL.map(n=>{const e=document.getElementById('s_'+n);return e?(parseFloat(e.value)||0):0;});
 }
 function fillEx(k){const v=EX_DYN[k]||EX[k];if(!v)return;document.getElementById('qp').value=v.join(', ');p2g();}
@@ -339,7 +344,7 @@ function msg(id,cls,html){document.getElementById(id).innerHTML=`<div class="msg
 let hc=0;
 async function classify(){
   const v=vals();
-  if(v.length!==22){msg('cr','err','Need exactly 22 values.');return;}
+  if(v.length!==17&&v.length!==22){msg('cr','err','Need exactly 17 or 22 values.');return;}
   document.getElementById('cr').innerHTML='<div class="msg info"><span class="spin"></span> Classifying&hellip;</div>';
   try{
     const r=await fetch('/smell/test_console',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({values:v.join(',')})});
@@ -409,10 +414,12 @@ async function trainCsv(){
   const ua=document.getElementById('uaug').checked;
   const na=parseInt(document.getElementById('naug').value)||5;
   const lc=document.getElementById('lc').checked;
+  const mh=document.getElementById('mh').checked;
+  if(!mh&&!confirm('Replace the current model and training history with ONLY this CSV?'))return;
   msg('tr','info','<span class="spin"></span> Training&hellip; this may take a minute.');
   try{
     const r=await fetch('/smell/learn_from_csv',{method:'POST',headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({csv_data:csv,target_column:tc,use_augmentation:ua,n_augmentations:na,lowercase_labels:lc,noise_std:0.0015})});
+      body:JSON.stringify({csv_data:csv,target_column:tc,use_augmentation:ua,n_augmentations:na,lowercase_labels:lc,noise_std:0.0015,merge_history:mh})});
     const d=await r.json();
     if(!r.ok){msg('tr','err',d.detail||JSON.stringify(d));return;}
     const cls=(d.classes||[]).join(', ')||'(none)';
