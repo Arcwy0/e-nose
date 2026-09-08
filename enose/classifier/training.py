@@ -53,17 +53,24 @@ def _load_history(classifier) -> Optional[pd.DataFrame]:
 
 
 _GROUP_CANDIDATES: Tuple[str, ...] = (
-    # segment_id is the tightest meaningful group for continuous recordings:
-    # two windows from the same bottle-swap segment are highly correlated,
-    # so keeping them on one side of the split is what actually prevents
-    # leakage. session_id is coarser but still useful when segment_id is
-    # absent. The other names are kept for historical CSVs.
-    "segment_id",
+    # Plateau windows from one bottle exposure are highly correlated, so the
+    # complete exposure must stay on one side of the diagnostic split.
+    # session_id is the fallback for recordings without explicit exposure ids.
+    "exposure_id",
     "session_id",
     "session",
     "recording_id",
     "source",
     "source_file",
+    "segment_id",
+)
+
+_BASELINE_GROUP_CANDIDATES: Tuple[str, ...] = (
+    "exposure_id",
+    "sniff_id",
+    "recording_id",
+    "session_id",
+    "session",
 )
 
 
@@ -80,6 +87,17 @@ def _extract_groups(combined: pd.DataFrame) -> Optional[pd.Series]:
             s = combined[col].astype(str)
             if s.nunique() >= 2:
                 print(f"[training] using '{col}' as group for GroupShuffleSplit ({s.nunique()} groups)")
+                return s
+    return None
+
+
+def _extract_baseline_groups(combined: pd.DataFrame) -> Optional[pd.Series]:
+    """Pick the tightest group that pairs each odor exposure with its air R0."""
+    for col in _BASELINE_GROUP_CANDIDATES:
+        if col in combined.columns:
+            s = combined[col].astype(str)
+            if s.nunique() >= 2:
+                print(f"[training] using '{col}' for per-exposure air baselines ({s.nunique()} groups)")
                 return s
     return None
 
@@ -209,6 +227,9 @@ def retrain_with_all_data(
     per_class_cap_multiplier: Optional[float] = None,
     drop_sensor_off_air: Optional[bool] = None,
     merge_history: bool = True,
+    classifier_backend: Optional[str] = None,
+    baseline_mode: Optional[str] = None,
+    snv: Optional[bool] = None,
 ) -> Tuple[bool, float, Optional[BalancedRFClassifier]]:
     """Train fresh, optionally merging prior history, and save canonical history.
 
@@ -281,8 +302,8 @@ def retrain_with_all_data(
 
     X_all = combined[ALL_SENSORS]
     y_all = combined["smell_label"]
-    if groups is None:
-        groups = _extract_groups(combined)
+    groups = pd.Series(list(groups)).reset_index(drop=True) if groups is not None else _extract_groups(combined)
+    baseline_groups = _extract_baseline_groups(combined)
     if groups is None:
         # Fall back to the run-id we stamped before capping. It survived the
         # shuffle as a column, so row-alignment is preserved.
@@ -296,8 +317,22 @@ def retrain_with_all_data(
     # Honor ENOSE_CLASSIFIER so a retrain triggered via /smell/learn_from_csv
     # uses the same backend the server was started with; returning a
     # different class would break the atomic swap in state.set_classifier.
-    cls = get_classifier_backend(os.environ.get("ENOSE_CLASSIFIER", "balanced_rf"))
-    fresh = cls(online_learning=True)
+    selected_backend = (
+        classifier_backend
+        or getattr(classifier, "backend_name", None)
+        or os.environ.get("ENOSE_CLASSIFIER", "balanced_rf")
+    )
+    cls = get_classifier_backend(selected_backend)
+    from enose.classifier.config import SmellClassifierConfig
+    fresh_config = SmellClassifierConfig()
+    inherited_config = getattr(classifier, "config", None)
+    effective_mode = baseline_mode if baseline_mode is not None else getattr(inherited_config, "baseline_mode", None)
+    effective_snv = snv if snv is not None else getattr(inherited_config, "snv", None)
+    if effective_mode is not None:
+        fresh_config.baseline_mode = str(effective_mode)
+    if effective_snv is not None:
+        fresh_config.snv = bool(effective_snv)
+    fresh = cls(online_learning=True, config=fresh_config)
     fresh.original_features = list(ALL_SENSORS)
     bal_acc = fresh.train(
         X_all, y_all,
@@ -305,6 +340,7 @@ def retrain_with_all_data(
         n_augmentations=n_augmentations,
         test_size=0.1,
         groups=groups,
+        baseline_groups=baseline_groups,
     )
 
     model_path = fresh.save_model(model_out_dir)

@@ -37,7 +37,7 @@ def reload_smell_classifier() -> bool:
         cls = get_classifier_backend(_selected_backend_name())
         clf = cls.load_model(latest_path)
         state.set_classifier(clf)
-        print(f"[reload] ✓ reloaded {cls.__name__} from {latest_path}; classes={list(clf.classes_)}")
+        print(f"[reload] ✓ reloaded {type(clf).__name__} from {latest_path}; classes={list(clf.classes_)}")
         return True
     except Exception as e:
         print(f"[reload] failed: {e}")

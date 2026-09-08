@@ -43,6 +43,7 @@ class BalancedRFClassifier(SmellClassifierBase):
     ALL_SENSORS: List[str] = ALL_SENSORS
 
     _label_col: str = "Gas name"
+    backend_name: str = "balanced_rf"
 
     def __init__(
         self,
@@ -81,6 +82,8 @@ class BalancedRFClassifier(SmellClassifierBase):
         self.confusion_matrix_: Optional[List[List[int]]] = None
         self.confusion_labels_: List[str] = []
         self.last_test_size_: int = 0
+        self.validation_strategy_: str = "not_evaluated"
+        self.validation_warning_: Optional[str] = None
 
         # Compact training-set summaries computed at train() time and persisted,
         # so /smell/model_info and /smell/class_examples keep working after the
@@ -94,6 +97,9 @@ class BalancedRFClassifier(SmellClassifierBase):
         # _original_baseline_ = the training-time fallback. Both map R1-R17 → R0.
         self.sensor_baseline_: Dict[str, float] = {}
         self._original_baseline_: Dict[str, float] = {}
+        # Training fallback and a baseline captured from today's hardware are
+        # intentionally distinct. This flag resets after every restart/train.
+        self.live_baseline_captured_: bool = False
 
     # ── model construction ──────────────────────────────────────────────────
     def _build_model(self, y_fit=None):
@@ -265,6 +271,7 @@ class BalancedRFClassifier(SmellClassifierBase):
             self.sensor_baseline_ = merged
         else:
             self.sensor_baseline_ = dict(new)
+        self.live_baseline_captured_ = bool(self.sensor_baseline_)
         return dict(self.sensor_baseline_)
 
     def _scaler_is_fitted(self) -> bool:
@@ -300,6 +307,7 @@ class BalancedRFClassifier(SmellClassifierBase):
         noise_std: Optional[float] = None,  # accepted for API compat
         test_size: Optional[float] = None,
         groups: Optional[pd.Series] = None,
+        baseline_groups: Optional[pd.Series] = None,
     ) -> float:
         """Fit-from-scratch on (X, y).
 
@@ -352,9 +360,10 @@ class BalancedRFClassifier(SmellClassifierBase):
         # representative baseline as the inference-time fallback.
         mode = getattr(self.config, "baseline_mode", "none") or "none"
         if mode != "none":
+            baseline_source = baseline_groups if baseline_groups is not None else groups
             grp = (
-                pd.Series(list(groups), index=X_df.index).astype(str)
-                if groups is not None
+                pd.Series(list(baseline_source), index=X_df.index).astype(str)
+                if baseline_source is not None
                 else pd.Series("all", index=X_df.index)
             )
             tmp = X_df.copy()
@@ -366,6 +375,7 @@ class BalancedRFClassifier(SmellClassifierBase):
             X_df = tmp[list(self.ALL_SENSORS)]
             self._original_baseline_ = self._mean_baselines(per_group_baselines)
             self.sensor_baseline_ = dict(self._original_baseline_)
+            self.live_baseline_captured_ = False
             if not self.sensor_baseline_:
                 print(
                     "[train] baseline_mode set but no clean-air rows found — "
@@ -400,17 +410,8 @@ class BalancedRFClassifier(SmellClassifierBase):
         X_train_s = preprocessing.scale_resistances(X_train, self.scaler_r, fit=True)
         X_test_s = preprocessing.scale_resistances(X_test, self.scaler_r, fit=False)
 
-        # Diagnostics state (z-scores, centroids) live in scaled space.
         feats = self._model_features
-        self.feature_means_ = X_train_s[feats].mean().to_dict()
-        stds = X_train_s[feats].std(ddof=0).replace(0, 1e-9)
-        self.feature_stds_ = stds.to_dict()
-        self.class_centroids_ = (
-            X_train_s.assign(_y=y_train.values)
-            .groupby("_y")[feats]
-            .mean()
-        )
-
+        # First fit is for honest holdout metrics only.
         self.model = self._build_model(y_fit=y_train.values)
         print(
             f"[train] fitting {type(self.model).__name__} on "
@@ -424,12 +425,44 @@ class BalancedRFClassifier(SmellClassifierBase):
         acc = accuracy_score(y_test, y_pred)
         bal_acc = balanced_accuracy_score(y_test, y_pred)
 
-        self.classes_ = getattr(self.model, "classes_", np.unique(y_train.values))
-        self.is_fitted = True
-        self.selected_features = list(feats)
         self.training_history["accuracy"].append(float(acc))
         self.training_history["balanced_accuracy"].append(float(bal_acc))
         self._log_test_report(y_test, y_pred, acc, bal_acc)
+
+        # The evaluated model intentionally excludes complete exposures. Once
+        # metrics are frozen, refit the deployable artifact on every available
+        # window. Otherwise a rigorous group holdout would permanently throw
+        # away a large fraction of scarce physical experiments.
+        X_fit = X_df.reset_index(drop=True)
+        y_fit = y_series.reset_index(drop=True)
+        if self.config.use_augmentation and self.config.n_augmentations > 0:
+            X_fit = preprocessing.augment_resistances(
+                X_fit, self.config.n_augmentations, self.config.noise_max
+            )
+            y_fit = pd.concat(
+                [y_fit] * (self.config.n_augmentations + 1), ignore_index=True
+            )
+        self.scaler_r = self._build_scaler()
+        X_fit_s = preprocessing.scale_resistances(X_fit, self.scaler_r, fit=True)
+        X_all_s = preprocessing.scale_resistances(X_df, self.scaler_r, fit=False)
+
+        # Diagnostics state (z-scores, centroids) represents the complete,
+        # non-augmented physical dataset in the final scaler's space.
+        self.feature_means_ = X_all_s[feats].mean().to_dict()
+        stds = X_all_s[feats].std(ddof=0).replace(0, 1e-9)
+        self.feature_stds_ = stds.to_dict()
+        self.class_centroids_ = (
+            X_all_s.assign(_y=y_series.reset_index(drop=True).values)
+            .groupby("_y")[feats]
+            .mean()
+        )
+
+        self.model = self._build_model(y_fit=y_fit.values)
+        print(f"[train] refitting deployable model on all {len(X_fit_s)} training rows")
+        self.model.fit(X_fit_s[feats].values, y_fit.values)
+        self.classes_ = getattr(self.model, "classes_", np.unique(y_fit.values))
+        self.is_fitted = True
+        self.selected_features = list(feats)
         self._compute_training_summaries()
         return float(bal_acc)
 
@@ -479,9 +512,18 @@ class BalancedRFClassifier(SmellClassifierBase):
             and self.config.group_shuffle_when_available
             and len(pd.Series(groups).unique()) >= 2
         ):
+            n_groups = int(pd.Series(groups).nunique())
+            # A 10% holdout can mean only one exposure and therefore omit most
+            # odors. Reserve enough complete groups for all-class diagnostics
+            # when the recording actually contains such a split.
+            requested_groups = int(np.ceil(float(test_size) * n_groups))
+            group_test_size = min(
+                max(requested_groups, int(y_series.nunique())),
+                n_groups - 1,
+            )
             gss = GroupShuffleSplit(
                 n_splits=64,
-                test_size=test_size,
+                test_size=group_test_size,
                 random_state=self.config.random_state,
             )
             all_labels = set(y_series.astype(str))
@@ -490,6 +532,8 @@ class BalancedRFClassifier(SmellClassifierBase):
                 test_labels = set(y_series.iloc[test_idx].astype(str))
                 if train_labels == all_labels and test_labels == all_labels:
                     print("[train] using group-disjoint split with all classes in train and test")
+                    self.validation_strategy_ = "group_disjoint_holdout"
+                    self.validation_warning_ = None
                     return (
                         X_df.iloc[train_idx].reset_index(drop=True),
                         X_df.iloc[test_idx].reset_index(drop=True),
@@ -500,6 +544,18 @@ class BalancedRFClassifier(SmellClassifierBase):
                 "[train] no group-disjoint split contains every class on both sides; "
                 "falling back to a stratified row split for complete diagnostics "
                 "(metrics may be optimistic for time-series data)"
+            )
+            self.validation_strategy_ = "stratified_row_fallback"
+            self.validation_warning_ = (
+                "No group-disjoint split contains every class on both sides. "
+                "Reported metrics use a row split and may be optimistic because "
+                "adjacent windows from one physical exposure can appear on both sides."
+            )
+        else:
+            self.validation_strategy_ = "stratified_row_holdout"
+            self.validation_warning_ = (
+                "No usable exposure/session groups were provided. Reported metrics "
+                "use a row split and may be optimistic for continuous recordings."
             )
 
         X_use = X_df.reset_index(drop=True)
@@ -739,6 +795,7 @@ class BalancedRFClassifier(SmellClassifierBase):
     def get_model_info(self) -> Dict[str, Any]:
         """Summary for `/smell/model_info` — classes, feature lists, training history, env config."""
         return {
+            "classifier_backend": getattr(self, "backend_name", "balanced_rf"),
             "model_loaded": True,
             "is_fitted": self.is_fitted,
             "classes": [str(c) for c in self.classes_],
@@ -767,7 +824,8 @@ class BalancedRFClassifier(SmellClassifierBase):
             "drift": {
                 "baseline_mode": getattr(self.config, "baseline_mode", "none"),
                 "snv": bool(getattr(self.config, "snv", False)),
-                "baseline_captured": bool(self.sensor_baseline_),
+                "baseline_captured": bool(self.live_baseline_captured_),
+                "training_fallback_available": bool(self._original_baseline_),
             },
             # Per-class precision/recall/F1 from the most recent test split.
             # Empty dict if this classifier was loaded from a pre-metrics
@@ -777,6 +835,10 @@ class BalancedRFClassifier(SmellClassifierBase):
             "confusion_matrix": self.confusion_matrix_,
             "confusion_labels": list(self.confusion_labels_ or []),
             "last_test_size": int(getattr(self, "last_test_size_", 0) or 0),
+            "validation": {
+                "strategy": str(getattr(self, "validation_strategy_", "unknown")),
+                "warning": getattr(self, "validation_warning_", None),
+            },
             # Full-dataset class balance (not just the last test split's
             # support) so the UI can show how many samples back each class.
             "class_distribution": self._class_distribution(),

@@ -109,6 +109,8 @@ class XGBTabularClassifier(BalancedRFClassifier):
     ``config.calibrated=True`` to re-enable.
     """
 
+    backend_name = "xgboost"
+
     def __init__(
         self,
         model_type: str = "xgboost",
@@ -121,7 +123,7 @@ class XGBTabularClassifier(BalancedRFClassifier):
         cfg.calibrated = False
         super().__init__(model_type=model_type, online_learning=online_learning, config=cfg)
 
-    def _build_model(self):
+    def _build_model(self, y_fit=None):
         """Hyperparameters kept conservative — trees + depth tuned for 22
         features × 6 classes × ~10⁵ rows. Edit SmellClassifierConfig if you
         want to expose these; for now they're local to the backend."""
@@ -151,6 +153,11 @@ def get_classifier_backend(name: str) -> type:
     doesn't crash startup — it just logs the miss and uses the default.
     """
     key = (name or "").strip().lower()
+    if key in ("two_stage", "two-stage", "response_shape", "stable"):
+        # Local import avoids a module cycle: two_stage subclasses the RF class,
+        # while classifier.__init__ also exports this resolver.
+        from .two_stage import TwoStageResponseClassifier
+        return TwoStageResponseClassifier
     if key in ("xgb", "xgboost", "xgbtabular"):
         return XGBTabularClassifier
     if key in ("", "rf", "balanced_rf", "brf"):

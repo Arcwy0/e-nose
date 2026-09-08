@@ -7,7 +7,9 @@ returns a DataFrame with canonical column names (`R1..R17`, env sensors, `smell_
 
 from __future__ import annotations
 
+import csv
 import os
+from io import StringIO
 from typing import Iterable, Optional
 
 import pandas as pd
@@ -16,6 +18,89 @@ from enose.config import ALL_SENSORS, ENV_DEFAULTS, ENVIRONMENTAL_SENSORS, RESIS
 
 
 LABEL_CANDIDATES = ("smell_label", "smell", "smell;", "class", "label", "Gas name")
+
+
+def _as_float(value: str) -> Optional[float]:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def parse_uploaded_enose_csv(
+    text: str,
+    label_column: str = "Gas name",
+) -> tuple[pd.DataFrame, dict]:
+    """Parse a normal CSV or recover the recorder's variable-width format.
+
+    Some 2025 exports have 19 empty header columns because repeated UART
+    environmental packets were appended before the gas label.  Pandas accepts
+    the file but silently places numeric packet fragments in ``Gas name``.
+    R1-R17 remain at fixed positions, so for those files we recover the last
+    non-numeric field after R17 as the label and discard ambiguous environment
+    packets.  Ordinary CSVs remain on the standard pandas path.
+    """
+    reader = csv.reader(StringIO(text))
+    try:
+        header = next(reader)
+    except StopIteration:
+        raise ValueError("CSV is empty")
+    canonical_prefix = header[:18] == ["Timestamp", *RESISTANCE_SENSORS]
+    variable_width = canonical_prefix and any(not name.strip() for name in header)
+    if not variable_width:
+        frame = pd.read_csv(StringIO(text), low_memory=False)
+        return frame, {
+            "parser": "standard",
+            "recovered_rows": 0,
+            "dropped_rows": 0,
+            "environment_reliable": all(sensor in frame.columns for sensor in ENVIRONMENTAL_SENSORS),
+        }
+
+    records = []
+    dropped = 0
+    repaired = 0
+    for fields in reader:
+        if len(fields) < 20:
+            dropped += 1
+            continue
+        resistances = [_as_float(value) for value in fields[1:18]]
+        if len(resistances) != 17 or any(value is None for value in resistances):
+            dropped += 1
+            continue
+        label_index = None
+        for index in range(len(fields) - 1, 17, -1):
+            token = fields[index].strip()
+            if token and _as_float(token) is None:
+                label_index = index
+                break
+        if label_index is None:
+            dropped += 1
+            continue
+        label = fields[label_index].strip()
+        row = {"Timestamp": fields[0].strip(), label_column: label}
+        row.update({sensor: float(value) for sensor, value in zip(RESISTANCE_SENSORS, resistances)})
+        # Only trust environment fields when the label is in its canonical
+        # position. Variable-length UART fragments cannot be disambiguated.
+        if label_index == 23:
+            for sensor, value in zip(ENVIRONMENTAL_SENSORS, fields[18:23]):
+                parsed = _as_float(value)
+                row[sensor] = parsed if parsed is not None else ENV_DEFAULTS[sensor]
+        else:
+            row.update(ENV_DEFAULTS)
+            repaired += 1
+        if label_index + 1 < len(fields):
+            gas_class = _as_float(fields[label_index + 1])
+            if gas_class is not None:
+                row["Gas label"] = gas_class
+        records.append(row)
+    if not records:
+        raise ValueError("variable-width CSV recovery produced no valid rows")
+    return pd.DataFrame(records), {
+        "parser": "variable_width_recovery",
+        "recovered_rows": repaired,
+        "dropped_rows": dropped,
+        "environment_reliable": False,
+    }
 
 
 def parse_semicolon_enose_csv(df: pd.DataFrame) -> pd.DataFrame:
@@ -85,7 +170,7 @@ def load_training_csv(candidates: Iterable[str]) -> Optional[pd.DataFrame]:
 
 
 _GROUP_COLUMNS_PASSTHROUGH = (
-    "segment_id", "window_idx", "session_id",
+    "segment_id", "window_idx", "session_id", "exposure_id",
     "recording_id", "source", "source_file",
 )
 

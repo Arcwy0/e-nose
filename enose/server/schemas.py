@@ -84,6 +84,14 @@ class CSVLearningData(BaseModel):
     # True is the Idea-1 default: retain prior classes/samples and add this CSV.
     # False trains a fresh model and replaces the canonical training history.
     merge_history: bool = True
+    # ``plateau`` converts a continuous timestamped recording into stable
+    # one-minute windows; ``raw`` preserves the historical row-wise behavior.
+    training_profile: str = "raw"
+    # ``two_stage`` is the drift/intensity-robust air detector + odor-shape
+    # classifier. Existing API callers remain on balanced_rf unless requested.
+    classifier_backend: str = "balanced_rf"
+    baseline_mode: str = "none"
+    snv: bool = False
 
 
 class ConsoleSensorData(BaseModel):

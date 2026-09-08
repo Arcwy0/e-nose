@@ -15,6 +15,7 @@ from .config import SmellClassifierConfig
 from .balanced_rf import BalancedRFClassifier
 from .xgb import XGBOdorClassifier, XGBClassifierConfig
 from .xgb_tabular import XGBTabularClassifier, get_classifier_backend
+from .two_stage import TwoStageResponseClassifier
 
 # Back-compat alias: existing code imports `SmellClassifier` expecting the Balanced RF
 SmellClassifier = BalancedRFClassifier
@@ -26,6 +27,7 @@ __all__ = [
     "SmellClassifier",
     "XGBTabularClassifier",
     "XGBOdorClassifier",
+    "TwoStageResponseClassifier",
     "XGBClassifierConfig",
     "get_classifier_backend",
 ]

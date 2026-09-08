@@ -25,6 +25,7 @@ def build_save_payload(classifier) -> Dict[str, Any]:
     trained on.
     """
     return {
+        "classifier_backend": str(getattr(classifier, "backend_name", "balanced_rf")),
         "model": classifier.model,
         "scaler_r": classifier.scaler_r,
         "classes_": classifier.classes_,
@@ -56,6 +57,10 @@ def build_save_payload(classifier) -> Dict[str, Any]:
         "confusion_matrix_": getattr(classifier, "confusion_matrix_", None),
         "confusion_labels_": list(getattr(classifier, "confusion_labels_", []) or []),
         "last_test_size_": int(getattr(classifier, "last_test_size_", 0) or 0),
+        "validation_strategy_": str(
+            getattr(classifier, "validation_strategy_", "unknown")
+        ),
+        "validation_warning_": getattr(classifier, "validation_warning_", None),
         # Compact training-set summaries — persisted so /smell/model_info and
         # /smell/class_examples keep working after the server reloads the model
         # from disk (which does not restore last_training_data).
@@ -140,6 +145,14 @@ def load(path: str, cls) -> "cls":
     if not isinstance(payload, dict):
         raise ValueError(f"Unsupported model payload type: {type(payload)}")
 
+    backend = str(payload.get("classifier_backend", "balanced_rf"))
+    if backend == "two_stage" and cls.__name__ != "TwoStageResponseClassifier":
+        from .two_stage import TwoStageResponseClassifier
+        cls = TwoStageResponseClassifier
+    elif backend == "xgboost" and cls.__name__ != "XGBTabularClassifier":
+        from .xgb_tabular import XGBTabularClassifier
+        cls = XGBTabularClassifier
+
     # Case B: dict container
     obj = cls()
     obj.is_fitted = True
@@ -203,6 +216,8 @@ def load(path: str, cls) -> "cls":
     obj.confusion_matrix_ = payload.get("confusion_matrix_", None)
     obj.confusion_labels_ = list(payload.get("confusion_labels_", []) or [])
     obj.last_test_size_ = int(payload.get("last_test_size_", 0) or 0)
+    obj.validation_strategy_ = str(payload.get("validation_strategy_", "unknown"))
+    obj.validation_warning_ = payload.get("validation_warning_")
 
     # Compact training summaries — empty on legacy payloads (the UI then shows
     # the built-in "Try" examples and an empty distribution until a retrain).
@@ -217,4 +232,7 @@ def load(path: str, cls) -> "cls":
     obj.config.baseline_ema_alpha = float(payload.get("baseline_ema_alpha", 0.3))
     obj.sensor_baseline_ = dict(payload.get("sensor_baseline_", {}) or {})
     obj._original_baseline_ = dict(payload.get("_original_baseline_", {}) or {})
+    # A live baseline belongs to one physical session and must never survive a
+    # process restart merely because the training fallback was persisted.
+    obj.live_baseline_captured_ = False
     return obj
