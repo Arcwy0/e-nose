@@ -140,7 +140,7 @@ python scripts/run_client.py --offline --server http://localhost:18080
 Install extras (see `SETUP.md`): server = `pip install -e ".[server,classifier-extras]"`
 (+`,vision` for Florence-2); client = `pip install -e ".[client]"`.
 
-Prebuilt client wheel for Windows colleagues: `dist/enose-3.1.2-py3-none-any.whl`
+Prebuilt client wheel for Windows colleagues: `dist/enose-3.2.0-py3-none-any.whl`
 → see [`CLIENT_WINDOWS_INSTALL.md`](CLIENT_WINDOWS_INSTALL.md).
 
 ---
