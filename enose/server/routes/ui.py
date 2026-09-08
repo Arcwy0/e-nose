@@ -176,16 +176,45 @@ textarea{resize:vertical;font-family:monospace;font-size:.85rem}
           <input id="tcol" value="Gas name">
         </div>
         <div>
-          <label for="naug">Augmentations (0 = none, 5 = recommended)</label>
-          <input id="naug" type="number" value="5" min="0" max="20">
+          <label for="naug">Augmentations (0 = none)</label>
+          <input id="naug" type="number" value="0" min="0" max="20">
+        </div>
+        <div>
+          <label for="tprofile">Training data profile</label>
+          <select id="tprofile" onchange="syncTrainingOptions()">
+            <option value="plateau" selected>Stable plateaus (recommended)</option>
+            <option value="raw">Every CSV row (legacy)</option>
+          </select>
+        </div>
+        <div>
+          <label for="tbackend">Classifier</label>
+          <select id="tbackend" onchange="syncTrainingOptions()">
+            <option value="balanced_rf" selected>Balanced RF + baseline (recommended)</option>
+            <option value="two_stage">Two-stage response shape (experimental)</option>
+            <option value="xgboost">Tabular XGBoost</option>
+          </select>
+        </div>
+        <div>
+          <label for="tbmode">Baseline representation</label>
+          <select id="tbmode">
+            <option value="logratio" selected>Log ratio to clean air</option>
+            <option value="ratio">Ratio to clean air</option>
+            <option value="delta">Difference from clean air</option>
+            <option value="none">Absolute resistance (legacy)</option>
+          </select>
         </div>
       </div>
 
+      <p id="train-profile-hint" class="hint">Stable mode uses one-minute medians from late, low-slope analyte plateaus and clean air immediately before each exposure. A Timestamp column is required.</p>
+
       <label style="display:flex;align-items:center;gap:.5rem;font-size:.85rem;cursor:pointer;margin-bottom:.5rem">
-        <input type="checkbox" id="uaug" checked style="width:auto"> Use data augmentation (recommended for small datasets)
+        <input type="checkbox" id="uaug" style="width:auto"> Use synthetic data augmentation (experimental)
       </label>
       <label style="display:flex;align-items:center;gap:.5rem;font-size:.85rem;cursor:pointer;margin-bottom:.75rem">
         <input type="checkbox" id="lc" checked style="width:auto"> Convert labels to lowercase automatically
+      </label>
+      <label style="display:flex;align-items:center;gap:.5rem;font-size:.85rem;cursor:pointer;margin-bottom:.75rem">
+        <input type="checkbox" id="tsnv" style="width:auto"> Apply SNV array normalization (experimental)
       </label>
       <label style="display:flex;align-items:flex-start;gap:.5rem;font-size:.85rem;cursor:pointer;margin-bottom:.75rem">
         <input type="checkbox" id="mh" checked style="width:auto;margin-top:.15rem">
@@ -209,6 +238,19 @@ textarea{resize:vertical;font-family:monospace;font-size:.85rem}
       <div class="brow" style="margin-bottom:.25rem">
         <button id="lv-tgl" class="btn bp" onclick="lvToggle()">&#9654; Start polling</button>
         <button class="btn bs" onclick="lvClear()" title="Empty the server-side ring buffer">&#128465;&#65039; Clear buffer</button>
+        <button class="btn bs" onclick="lvBaseline()" title="Use the last stable minute of clean air">Set clean-air baseline</button>
+        <button class="btn bp" onclick="lvClassifyFast()" title="Average a short live window; may return a provisional or unknown result">Fast prediction</button>
+        <label style="display:flex;align-items:center;gap:.35rem;font-size:.82rem;margin-bottom:0">
+          Fast window:
+          <select id="lv-fast-win" style="width:auto;padding:.2rem .4rem;font-size:.8rem">
+            <option value="5">5&thinsp;s</option>
+            <option value="10">10&thinsp;s</option>
+            <option value="15" selected>15&thinsp;s</option>
+            <option value="30">30&thinsp;s</option>
+          </select>
+        </label>
+        <button class="btn bsuc" onclick="lvClassifyStable()" title="Classify the median of the last stable minute">Classify stable window</button>
+        <button class="btn bs" onclick="lvRecovery()" title="Verify return to the captured clean-air baseline">Check recovery</button>
         <label style="display:flex;align-items:center;gap:.35rem;font-size:.82rem;margin-left:auto;margin-bottom:0;cursor:pointer">
           <input type="checkbox" id="lv-norm" checked style="width:auto"> Normalize R sensors (per-trace)
         </label>
@@ -222,6 +264,7 @@ textarea{resize:vertical;font-family:monospace;font-size:.85rem}
           </select>
         </label>
       </div>
+      <div id="lv-action"></div>
 
       <div class="lvmeta">
         <div class="lvstat"><div class="k">Status</div><div class="v"><span id="lv-dot" class="lvdot off"></span><span id="lv-state">idle</span></div></div>
@@ -303,7 +346,7 @@ function p2g(){
   const full=parts.length===17?parts.concat(['21','49','400','0','5']):parts;
   ALL.forEach((n,i)=>{const e=document.getElementById('s_'+n);if(e)e.value=full[i]||'';});
 }
-document.addEventListener('DOMContentLoaded',()=>{mkGrid();document.getElementById('qp').addEventListener('input',p2g);renderTryButtons();refreshStatus();loadClassExamples();});
+document.addEventListener('DOMContentLoaded',()=>{mkGrid();document.getElementById('qp').addEventListener('input',p2g);renderTryButtons();syncTrainingOptions();refreshStatus();loadClassExamples();});
 
 function showTab(t){
   ['classify','train','live','status'].forEach((x,i)=>{
@@ -407,24 +450,51 @@ function loadFile(inp){
   const rd=new FileReader();rd.onload=e=>{document.getElementById('csvp').value=e.target.result;};rd.readAsText(f);
 }
 
+function syncTrainingOptions(){
+  const plateau=document.getElementById('tprofile').value==='plateau';
+  const two=document.getElementById('tbackend').value==='two_stage';
+  document.getElementById('train-profile-hint').textContent=plateau
+    ?'Stable mode uses one-minute medians from late, low-slope analyte plateaus and clean air immediately before each exposure. A Timestamp column is required.'
+    :'Legacy mode trains on every row, including exposure and recovery transients.';
+  if(two){
+    document.getElementById('tbmode').value='logratio';
+    document.getElementById('tbmode').disabled=true;
+    document.getElementById('tsnv').checked=false;
+    document.getElementById('tsnv').disabled=true;
+    document.getElementById('uaug').checked=false;
+    document.getElementById('naug').value='0';
+  }else{
+    document.getElementById('tbmode').disabled=false;
+    document.getElementById('tsnv').disabled=false;
+  }
+}
+
 async function trainCsv(){
   const csv=document.getElementById('csvp').value.trim();
   if(!csv){msg('tr','err','No CSV data provided.');return;}
   const tc=document.getElementById('tcol').value.trim()||'Gas name';
   const ua=document.getElementById('uaug').checked;
-  const na=parseInt(document.getElementById('naug').value)||5;
+  const parsedAug=parseInt(document.getElementById('naug').value);
+  const na=Number.isFinite(parsedAug)?parsedAug:5;
   const lc=document.getElementById('lc').checked;
   const mh=document.getElementById('mh').checked;
+  const profile=document.getElementById('tprofile').value;
+  const backend=document.getElementById('tbackend').value;
+  const baselineMode=document.getElementById('tbmode').value;
+  const snv=document.getElementById('tsnv').checked;
   if(!mh&&!confirm('Replace the current model and training history with ONLY this CSV?'))return;
   msg('tr','info','<span class="spin"></span> Training&hellip; this may take a minute.');
   try{
     const r=await fetch('/smell/learn_from_csv',{method:'POST',headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({csv_data:csv,target_column:tc,use_augmentation:ua,n_augmentations:na,lowercase_labels:lc,noise_std:0.0015,merge_history:mh})});
+      body:JSON.stringify({csv_data:csv,target_column:tc,use_augmentation:ua,n_augmentations:na,lowercase_labels:lc,noise_std:0.0015,merge_history:mh,training_profile:profile,classifier_backend:backend,baseline_mode:baselineMode,snv:snv})});
     const d=await r.json();
     if(!r.ok){msg('tr','err',d.detail||JSON.stringify(d));return;}
     const cls=(d.classes||[]).join(', ')||'(none)';
     const acc=d.current_accuracy!=null?(d.current_accuracy*100).toFixed(2)+'%':'&mdash;';
-    msg('tr','ok',`&#10003; Training complete!<br>Samples: ${d.samples_processed} &nbsp;|&nbsp; Accuracy: ${acc}<br>Update: ${d.update_type}<br>Known smells: <strong>${cls}</strong>`);
+    const warnings=((d.profile_report||{}).input_quality||{}).warnings||[];
+    const quality=warnings.length?`<br><strong>Data warnings:</strong> ${warnings.join('; ')}`:'';
+    const received=d.samples_received||d.samples_processed;
+    msg('tr','ok',`&#10003; Training complete!<br>Input rows: ${received} &nbsp;|&nbsp; Training windows used: ${d.samples_processed} &nbsp;|&nbsp; Accuracy: ${acc}<br>Profile: ${d.training_profile} &nbsp;|&nbsp; Classifier: ${d.classifier_backend} &nbsp;|&nbsp; Baseline: ${d.baseline_mode}<br>Update: ${d.update_type}<br>Known smells: <strong>${cls}</strong>${quality}`);
     // Refresh everything that depends on the model so the UI never shows a
     // stale view after a retrain: top badges, Model Info tab, and the dynamic
     // "Try" buttons (which mirror the current known classes).
@@ -485,6 +555,8 @@ async function loadInfo(){
     // or not shown at all (feature count, calibration, sample totals).
     const feat=d.features||{};
     const calib=d.calibration||{};
+    const drift=d.drift||{};
+    const validation=d.validation||{};
     const nFeat=(feat.model_input||feat.all||[]).length;
     const total=d.total_training_samples||0;
     const factsHtml=`<div class="lvmeta" style="margin-top:.75rem">
@@ -495,7 +567,12 @@ async function loadInfo(){
       <div class="lvstat"><div class="k">Last accuracy</div><div class="v">${acc!=null?(acc*100).toFixed(1)+'%':'—'}</div></div>
       <div class="lvstat"><div class="k">Balanced acc.</div><div class="v">${bal!=null?(bal*100).toFixed(1)+'%':'—'}</div></div>
       <div class="lvstat"><div class="k">Calibration</div><div class="v" style="font-size:.9rem">${calib.enabled?(calib.method||'on'):'off'}</div></div>
+      <div class="lvstat"><div class="k">Backend</div><div class="v" style="font-size:.9rem">${d.classifier_backend||'balanced_rf'}</div></div>
+      <div class="lvstat"><div class="k">Baseline mode</div><div class="v" style="font-size:.9rem">${drift.baseline_mode||'none'}</div></div>
+      <div class="lvstat"><div class="k">Live baseline</div><div class="v" style="font-size:.9rem">${drift.baseline_captured?'captured':'missing'}</div></div>
     </div>`;
+    const validationHtml=validation.warning
+      ?`<div class="msg info"><strong>Validation limitation:</strong> ${validation.warning}</div>`:'';
 
     // Class distribution — how many training samples back each class. Uneven
     // bars flag under-represented smells that the model will predict weakly.
@@ -573,6 +650,7 @@ async function loadInfo(){
       <p><strong>Known smells (${cls.length}):</strong></p>
       <div class="ctags">${tags||'<em style="color:var(--muted)">none yet</em>'}</div>
       ${factsHtml}
+      ${validationHtml}
       ${distHtml}
       ${pcmHtml}
       ${cmHtml}
@@ -639,6 +717,55 @@ async function lvClear(){
       document.getElementById('lv-msg').innerHTML='<div class="msg ok">Buffer cleared.</div>';
       setTimeout(()=>{document.getElementById('lv-msg').innerHTML='';},2000);}
   }catch(e){}
+}
+
+async function lvBaseline(){
+  msg('lv-action','info','<span class="spin"></span> Checking stability and capturing clean air&hellip;');
+  try{
+    const r=await fetch('/smell/baseline/live?window=60&max_relative_slope=0.002&min_samples=10',{method:'POST'});
+    const d=await r.json();
+    if(!r.ok){msg('lv-action','err',d.detail||JSON.stringify(d));return;}
+    msg('lv-action','ok',`Baseline captured from ${d.n_air_samples} stable samples. Stability score: ${Number(d.stability_score).toFixed(6)}.`);
+    loadInfo();
+  }catch(e){msg('lv-action','err','Request failed: '+e.message);}
+}
+
+async function lvClassifyStable(){
+  msg('lv-action','info','<span class="spin"></span> Checking and classifying the stable window&hellip;');
+  try{
+    const r=await fetch('/smell/classify_stable?window=60&max_relative_slope=0.002&min_samples=10',{method:'POST'});
+    const d=await r.json();
+    if(!r.ok){msg('lv-action','err',d.detail||JSON.stringify(d));return;}
+    const pct=(Number(d.confidence||0)*100).toFixed(1);
+    msg('lv-action','ok',`Stable-window prediction: <strong>${d.predicted_smell}</strong> (${pct}%), using ${d.n_samples} samples. Stability score: ${Number(d.stability_score).toFixed(6)}.`);
+  }catch(e){msg('lv-action','err','Request failed: '+e.message);}
+}
+
+async function lvClassifyFast(){
+  const windowSeconds=Number(document.getElementById('lv-fast-win').value)||15;
+  msg('lv-action','info',`<span class="spin"></span> Aggregating the last ${windowSeconds} seconds&hellip;`);
+  try{
+    const binSeconds=Math.max(2,Math.min(5,windowSeconds/2));
+    const r=await fetch(`/smell/classify_window?window=${windowSeconds}&bin_seconds=${binSeconds}&min_samples=5&min_confidence=0.45&min_margin=0.10`,{method:'POST'});
+    const d=await r.json();
+    if(!r.ok){msg('lv-action','err',d.detail||JSON.stringify(d));return;}
+    const pct=(Number(d.confidence||0)*100).toFixed(1);
+    const margin=(Number(d.confidence_margin||0)*100).toFixed(1);
+    const state=d.abstained?'Low confidence: abstained':(d.provisional?'Provisional response':'Stable response');
+    const cls=d.abstained?`unknown (best candidate: ${d.candidate_smell})`:d.predicted_smell;
+    msg('lv-action',d.abstained?'info':'ok',`${state}: <strong>${cls}</strong> (${pct}%, margin ${margin}%), ${Number(d.measurement_latency_seconds).toFixed(1)} s observed across ${d.bins_used} bins; server inference ${Number(d.inference_compute_ms||0).toFixed(1)} ms.`);
+  }catch(e){msg('lv-action','err','Request failed: '+e.message);}
+}
+
+async function lvRecovery(){
+  msg('lv-action','info','<span class="spin"></span> Comparing the last 15 seconds with clean air&hellip;');
+  try{
+    const r=await fetch('/smell/recovery?window=15&response_threshold=0.12&min_samples=5');
+    const d=await r.json();
+    if(!r.ok){msg('lv-action','err',d.detail||JSON.stringify(d));return;}
+    const text=d.recovered?'Recovered: ready for the next exposure.':'Not recovered: keep purging in clean air.';
+    msg('lv-action',d.recovered?'ok':'info',`${text} Response distance: ${Number(d.response_score).toFixed(3)}; stability: ${Number(d.stability_score).toFixed(6)}.`);
+  }catch(e){msg('lv-action','err','Request failed: '+e.message);}
 }
 
 function lvWindowRows(){

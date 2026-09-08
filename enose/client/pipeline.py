@@ -162,7 +162,7 @@ class TrainingPipeline:
             if avg:
                 self.display_22_feature_sample(avg)
 
-            print("Step 4: online learning")
+            print("Step 4: online learning (stable median windows)")
             result, err = self.server_api.online_learning(sensor_data, object_name)
             if err:
                 print(f"Online learning failed: {err}")
@@ -286,8 +286,25 @@ class TrainingPipeline:
                 return False
 
             target = input("Target column (default 'Gas name'): ").strip() or "Gas name"
-            use_aug = input("Use augmentation? (y/n, default y): ").lower().strip() != "n"
-            n_aug = 5
+            plateau = input(
+                "Extract stable plateaus from timestamped recording? (y/n, default y): "
+            ).lower().strip() != "n"
+            training_profile = "plateau" if plateau else "raw"
+            backend_default = "balanced_rf"
+            classifier_backend = input(
+                f"Classifier (two_stage/balanced_rf/xgboost, default {backend_default}): "
+            ).strip().lower() or backend_default
+            baseline_mode = "logratio" if classifier_backend == "two_stage" else (
+                input("Baseline mode (none/delta/ratio/logratio, default logratio): ").strip().lower()
+                or "logratio"
+            )
+            snv = False
+            if classifier_backend != "two_stage":
+                snv = input("Apply SNV normalization? (y/n, default n): ").lower().strip() == "y"
+            use_aug = input("Use augmentation? (y/n, default n): ").lower().strip() == "y"
+            if classifier_backend == "two_stage":
+                use_aug = False
+            n_aug = 5 if use_aug else 0
             if use_aug:
                 try:
                     n_aug_in = input("Augmentations (default 5): ").strip()
@@ -301,7 +318,16 @@ class TrainingPipeline:
             ).lower().strip() != "n"
 
             result, err = self.server_api.learn_from_csv(
-                csv_path, target, use_aug, n_aug, lowercase, merge_history
+                csv_path,
+                target,
+                use_aug,
+                n_aug,
+                lowercase,
+                merge_history,
+                training_profile,
+                classifier_backend,
+                baseline_mode,
+                snv,
             )
             if err:
                 print(f"CSV learning failed: {err}")

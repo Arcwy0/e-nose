@@ -87,6 +87,62 @@ class ServerAPI:
         except Exception as e:
             return None, f"Baseline error: {e}"
 
+    def set_baseline_from_live(self, window: float = 60.0) -> Result:
+        """Capture a baseline from the server's recent stable live buffer."""
+        try:
+            r = requests.post(
+                f"{self.base_url}/smell/baseline/live",
+                params={"window": window},
+                timeout=15,
+            )
+            return self._handle_response(r)
+        except requests.exceptions.Timeout:
+            return None, "Live baseline timeout"
+        except Exception as e:
+            return None, f"Live baseline error: {e}"
+
+    def classify_stable_window(self, window: float = 60.0) -> Result:
+        """Classify a stable median window from the server live buffer."""
+        try:
+            r = requests.post(
+                f"{self.base_url}/smell/classify_stable",
+                params={"window": window},
+                timeout=15,
+            )
+            return self._handle_response(r)
+        except requests.exceptions.Timeout:
+            return None, "Stable-window classification timeout"
+        except Exception as e:
+            return None, f"Stable-window classification error: {e}"
+
+    def classify_fast_window(self, window: float = 15.0) -> Result:
+        """Average short live-window probabilities for a low-latency result."""
+        try:
+            r = requests.post(
+                f"{self.base_url}/smell/classify_window",
+                params={"window": window},
+                timeout=15,
+            )
+            return self._handle_response(r)
+        except requests.exceptions.Timeout:
+            return None, "Fast-window classification timeout"
+        except Exception as e:
+            return None, f"Fast-window classification error: {e}"
+
+    def recovery_status(self, window: float = 15.0) -> Result:
+        """Check whether the live array has recovered to the session baseline."""
+        try:
+            r = requests.get(
+                f"{self.base_url}/smell/recovery",
+                params={"window": window},
+                timeout=15,
+            )
+            return self._handle_response(r)
+        except requests.exceptions.Timeout:
+            return None, "Recovery check timeout"
+        except Exception as e:
+            return None, f"Recovery check error: {e}"
+
     # ── Vision ────────────────────────────────────────────────────────────
     def detect_object(self, image_path: str, object_name: str) -> Result:
         try:
@@ -217,6 +273,10 @@ class ServerAPI:
         n_augmentations: int = 5,
         lowercase_labels: bool = True,
         merge_history: bool = True,
+        training_profile: str = "raw",
+        classifier_backend: str = "balanced_rf",
+        baseline_mode: str = "none",
+        snv: bool = False,
     ) -> Result:
         try:
             df = pd.read_csv(csv_file_path)
@@ -240,12 +300,16 @@ class ServerAPI:
                 "noise_std": 0.0015,
                 "lowercase_labels": lowercase_labels,
                 "merge_history": merge_history,
+                "training_profile": training_profile,
+                "classifier_backend": classifier_backend,
+                "baseline_mode": baseline_mode,
+                "snv": snv,
             }
             mode = "merge history" if merge_history else "replace history"
             print(f"Sending CSV learning request: {mode}, aug={use_augmentation}(n={n_augmentations})")
             r = requests.post(
                 f"{self.base_url}/smell/learn_from_csv",
-                json=payload, timeout=120,
+                json=payload, timeout=600,
             )
             return self._handle_response(r)
         except FileNotFoundError:

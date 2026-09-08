@@ -2,21 +2,134 @@
 
 from __future__ import annotations
 
-from typing import Any, Dict
+import time
+from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, HTTPException
+import numpy as np
+import pandas as pd
+from fastapi import APIRouter, HTTPException, Query
 
 from fastapi.responses import JSONResponse
 
 from enose.config import ALL_SENSORS, ENV_DEFAULTS, ENVIRONMENTAL_SENSORS, RESISTANCE_SENSORS
+from enose.utils.plateau import relative_slope_score
 
 from .. import state
 from ..jsonsafe import json_safe
+from ..live_buffer import buffer as live_buffer
 from ..schemas import BaselineData, ConsoleSensorData, SensorData
 
 router = APIRouter(prefix="/smell")
 
 _NO_STORE = {"Cache-Control": "no-store, no-cache, must-revalidate", "Pragma": "no-cache"}
+
+
+def _recent_live_frame(window: float, session_id: Optional[str]) -> pd.DataFrame:
+    items = live_buffer.snapshot()
+    if session_id:
+        items = [item for item in items if item.get("session_id") == session_id]
+    if not items:
+        raise HTTPException(status_code=409, detail="live sensor buffer is empty")
+    newest = max(float(item.get("t", 0.0)) for item in items)
+    items = [item for item in items if float(item.get("t", 0.0)) >= newest - window]
+    records: List[Dict[str, Any]] = []
+    for item in items:
+        sample = dict(item.get("sample") or {})
+        sample["_timestamp"] = pd.to_datetime(float(item.get("t", time.time())), unit="s")
+        records.append(sample)
+    return pd.DataFrame(records)
+
+
+def _stable_live_frame(
+    window: float,
+    session_id: Optional[str],
+    max_relative_slope: float,
+    min_samples: int,
+) -> tuple[pd.DataFrame, float]:
+    frame = _recent_live_frame(window, session_id)
+    _require_resistance_columns(frame)
+    if len(frame) < min_samples:
+        raise HTTPException(
+            status_code=409,
+            detail=f"need at least {min_samples} recent samples; got {len(frame)}",
+        )
+    span = float((frame["_timestamp"].max() - frame["_timestamp"].min()).total_seconds())
+    if span < window * 0.5:
+        raise HTTPException(
+            status_code=409,
+            detail=f"recent samples span only {span:.1f}s; need at least {window * 0.5:.1f}s",
+        )
+    score = relative_slope_score(frame)
+    if score > max_relative_slope:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"sensor response is still transitioning: stability_score={score:.6f} "
+                f"> {max_relative_slope:.6f}"
+            ),
+        )
+    return frame, score
+
+
+def _require_resistance_columns(frame: pd.DataFrame) -> None:
+    missing = [sensor for sensor in RESISTANCE_SENSORS if sensor not in frame.columns]
+    if missing:
+        raise HTTPException(status_code=409, detail=f"live samples are missing resistance sensors: {missing}")
+
+
+def _validate_live_span(frame: pd.DataFrame, window: float, min_samples: int) -> float:
+    if len(frame) < min_samples:
+        raise HTTPException(
+            status_code=409,
+            detail=f"need at least {min_samples} recent samples; got {len(frame)}",
+        )
+    span = float((frame["_timestamp"].max() - frame["_timestamp"].min()).total_seconds())
+    if span < window * 0.5:
+        raise HTTPException(
+            status_code=409,
+            detail=f"recent samples span only {span:.1f}s; need at least {window * 0.5:.1f}s",
+        )
+    return span
+
+
+def _median_live_sample(frame: pd.DataFrame) -> tuple[Dict[str, float], Dict[str, Any]]:
+    sample: Dict[str, float] = {}
+    coverage: Dict[str, float] = {}
+    for sensor in ALL_SENSORS:
+        if sensor not in frame.columns:
+            sample[sensor] = ENV_DEFAULTS.get(sensor, 0.0)
+            if sensor in RESISTANCE_SENSORS:
+                coverage[sensor] = 0.0
+            continue
+        values = pd.to_numeric(frame[sensor], errors="coerce")
+        if sensor in RESISTANCE_SENSORS:
+            positive = values.where(values > 0.0).dropna()
+            coverage[sensor] = float(len(positive) / max(len(frame), 1))
+            value = positive.median() if len(positive) else float("nan")
+        else:
+            finite = values.dropna()
+            value = finite.median() if len(finite) else float("nan")
+        sample[sensor] = float(value) if pd.notna(value) else ENV_DEFAULTS.get(sensor, 0.0)
+    active = [sensor for sensor, fraction in coverage.items() if fraction > 0.0]
+    quality = {
+        "active_resistance_sensors": active,
+        "n_active_resistance_sensors": len(active),
+        "sparse_resistance_sensors": [
+            sensor for sensor, fraction in coverage.items() if 0.0 < fraction < 0.5
+        ],
+        "missing_resistance_sensors": [sensor for sensor in RESISTANCE_SENSORS if sensor not in active],
+        "positive_coverage": coverage,
+    }
+    return sample, quality
+
+
+def _require_live_baseline(clf) -> None:
+    mode = getattr(getattr(clf, "config", None), "baseline_mode", "none") or "none"
+    if mode != "none" and not bool(getattr(clf, "live_baseline_captured_", False)):
+        raise HTTPException(
+            status_code=409,
+            detail="capture a clean-air baseline for this live session before classifying",
+        )
 
 
 @router.get("/class_examples")
@@ -241,14 +354,191 @@ async def set_baseline(data: BaselineData) -> Dict[str, Any]:
     if not hasattr(clf, "update_baseline"):
         return {"applied": False, "baseline_mode": mode,
                 "message": "classifier backend does not support baseline capture"}
-    baseline = clf.update_baseline(data.sensor_data, ema=bool(data.ema))
+    baseline_sample, quality = _median_live_sample(pd.DataFrame(data.sensor_data))
+    if quality["n_active_resistance_sensors"] < 12:
+        raise HTTPException(status_code=400, detail="fewer than 12 resistance sensors are active")
+    baseline = clf.update_baseline([baseline_sample], ema=bool(data.ema))
+    clf.live_baseline_captured_ = bool(baseline)
     return {
         "applied": mode != "none",
         "baseline_mode": mode,
         "n_sensors": len(baseline),
         "n_air_samples": len(data.sensor_data),
+        "sensor_quality": quality,
         "message": (
             "baseline updated" if mode != "none"
             else "stored but unused (model trained in absolute mode)"
         ),
+    }
+
+
+@router.post("/baseline/live")
+async def set_baseline_from_live(
+    window: float = Query(60.0, gt=5.0, le=300.0),
+    max_relative_slope: float = Query(0.002, gt=0.0),
+    min_samples: int = Query(10, ge=5),
+    session_id: Optional[str] = Query(None),
+) -> Dict[str, Any]:
+    """Capture a clean-air baseline from a stable recent live window."""
+    clf = state.require_fitted_classifier()
+    frame, score = _stable_live_frame(window, session_id, max_relative_slope, min_samples)
+    baseline_sample, quality = _median_live_sample(frame)
+    if quality["n_active_resistance_sensors"] < 12:
+        raise HTTPException(status_code=409, detail="fewer than 12 resistance sensors are active")
+    baseline = clf.update_baseline([baseline_sample], ema=False)
+    clf.live_baseline_captured_ = bool(baseline)
+    mode = getattr(clf.config, "baseline_mode", "none") or "none"
+    return {
+        "applied": mode != "none",
+        "baseline_mode": mode,
+        "n_air_samples": len(frame),
+        "n_sensors": len(baseline),
+        "stability_score": score,
+        "sensor_quality": quality,
+        "session_id": session_id,
+    }
+
+
+@router.post("/classify_stable")
+async def classify_stable_live_window(
+    window: float = Query(60.0, gt=5.0, le=300.0),
+    max_relative_slope: float = Query(0.002, gt=0.0),
+    min_samples: int = Query(10, ge=5),
+    session_id: Optional[str] = Query(None),
+) -> Dict[str, Any]:
+    """Classify the median of a stable recent window, never a transient frame."""
+    clf = state.require_fitted_classifier()
+    _require_live_baseline(clf)
+    frame, score = _stable_live_frame(window, session_id, max_relative_slope, min_samples)
+    sample, quality = _median_live_sample(frame)
+    if quality["n_active_resistance_sensors"] < 12:
+        raise HTTPException(status_code=409, detail="fewer than 12 resistance sensors are active")
+    probabilities = clf.predict_proba(sample)[0]
+    prediction = str(clf.classes_[int(np.argmax(probabilities))])
+    return {
+        "stable": True,
+        "stability_score": score,
+        "n_samples": len(frame),
+        "predicted_smell": prediction,
+        "confidence": float(max(probabilities)),
+        "all_probabilities": {
+            str(label): float(probability)
+            for label, probability in zip(clf.classes_, probabilities)
+        },
+        "sensor_input": sample,
+        "sensor_quality": quality,
+    }
+
+
+@router.post("/classify_window")
+async def classify_recent_window(
+    window: float = Query(15.0, gt=3.0, le=120.0),
+    bin_seconds: float = Query(5.0, gt=1.0, le=30.0),
+    min_samples: int = Query(5, ge=3),
+    max_relative_slope: float = Query(0.002, gt=0.0),
+    min_confidence: float = Query(0.45, ge=0.0, le=1.0),
+    min_margin: float = Query(0.10, ge=0.0, le=1.0),
+    session_id: Optional[str] = Query(None),
+) -> Dict[str, Any]:
+    """Fast, noise-reduced prediction from a short live window.
+
+    Probabilities are averaged across short median bins. A changing response is
+    allowed and reported as provisional; low-confidence/tied results abstain as
+    ``unknown`` rather than forcing the wrong odor.
+    """
+    compute_started = time.perf_counter()
+    clf = state.require_fitted_classifier()
+    _require_live_baseline(clf)
+    frame = _recent_live_frame(window, session_id).sort_values("_timestamp").reset_index(drop=True)
+    _require_resistance_columns(frame)
+    span = _validate_live_span(frame, window, min_samples)
+    score = relative_slope_score(frame)
+    start = frame["_timestamp"].min()
+    bin_index = ((frame["_timestamp"] - start).dt.total_seconds() / bin_seconds).astype(int)
+    bin_samples: List[Dict[str, float]] = []
+    for _, part in frame.groupby(bin_index, sort=True):
+        if len(part) < 2:
+            continue
+        sample, quality = _median_live_sample(part)
+        if quality["n_active_resistance_sensors"] < 12:
+            continue
+        bin_samples.append(sample)
+    if not bin_samples:
+        raise HTTPException(
+            status_code=409,
+            detail="no short bins contain readings from at least 12 resistance sensors",
+        )
+    # One batched forest call is substantially faster than one call per bin.
+    probability_rows = np.asarray(clf.predict_proba(pd.DataFrame(bin_samples)), dtype=float)
+    probabilities = np.mean(probability_rows, axis=0)
+    order = np.argsort(probabilities)[::-1]
+    top = int(order[0])
+    confidence = float(probabilities[top])
+    margin = float(confidence - probabilities[order[1]]) if len(order) > 1 else confidence
+    candidate = str(clf.classes_[top])
+    accepted = confidence >= min_confidence and margin >= min_margin
+    overall_sample, overall_quality = _median_live_sample(frame)
+    return {
+        "predicted_smell": candidate if accepted else "unknown",
+        "candidate_smell": candidate,
+        "accepted": accepted,
+        "abstained": not accepted,
+        "confidence": confidence,
+        "confidence_margin": margin,
+        "all_probabilities": {
+            str(label): float(probability)
+            for label, probability in zip(clf.classes_, probabilities)
+        },
+        "measurement_latency_seconds": span,
+        "inference_compute_ms": round((time.perf_counter() - compute_started) * 1000.0, 3),
+        "requested_window_seconds": window,
+        "bins_used": len(bin_samples),
+        "stable": score <= max_relative_slope,
+        "provisional": score > max_relative_slope,
+        "stability_score": score,
+        "sensor_quality": overall_quality,
+        "sensor_input": overall_sample,
+        "session_id": session_id,
+    }
+
+
+@router.get("/recovery")
+async def recovery_status(
+    window: float = Query(15.0, gt=3.0, le=120.0),
+    response_threshold: float = Query(0.12, gt=0.0, le=1.0),
+    max_relative_slope: float = Query(0.002, gt=0.0),
+    min_samples: int = Query(5, ge=3),
+    session_id: Optional[str] = Query(None),
+) -> Dict[str, Any]:
+    """Report whether the array has returned to its captured clean-air baseline."""
+    clf = state.require_fitted_classifier()
+    _require_live_baseline(clf)
+    frame = _recent_live_frame(window, session_id)
+    _require_resistance_columns(frame)
+    span = _validate_live_span(frame, window, min_samples)
+    sample, quality = _median_live_sample(frame)
+    baseline = dict(getattr(clf, "sensor_baseline_", {}) or {})
+    deviations = []
+    for sensor in RESISTANCE_SENSORS:
+        current = float(sample.get(sensor, 0.0))
+        reference = float(baseline.get(sensor, 0.0))
+        if current > 0.0 and reference > 0.0:
+            deviations.append(abs(float(np.log(current / reference))))
+    if len(deviations) < 12:
+        raise HTTPException(status_code=409, detail="fewer than 12 sensors can be compared to baseline")
+    response_score = float(np.quantile(deviations, 0.8))
+    stability_score = relative_slope_score(frame)
+    stable = stability_score <= max_relative_slope
+    recovered = response_score <= response_threshold and stable
+    return {
+        "recovered": recovered,
+        "stable": stable,
+        "response_score": response_score,
+        "response_threshold": response_threshold,
+        "stability_score": stability_score,
+        "max_relative_slope": max_relative_slope,
+        "measurement_latency_seconds": span,
+        "n_sensors_compared": len(deviations),
+        "sensor_quality": quality,
+        "session_id": session_id,
     }

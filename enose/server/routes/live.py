@@ -72,9 +72,14 @@ def _run_classifier(sample: Dict[str, float]) -> Optional[Dict[str, Any]]:
     clf = state.smell_classifier
     if clf is None or not getattr(clf, "is_fitted", False):
         return None
+    mode = getattr(getattr(clf, "config", None), "baseline_mode", "none") or "none"
+    if mode != "none" and not bool(getattr(clf, "live_baseline_captured_", False)):
+        # Do not display predictions made against a stale training-time
+        # fallback as if they belonged to today's live sensor session.
+        return None
     try:
-        pred = clf.predict(sample)[0]
         probs = clf.predict_proba(sample)[0]
+        pred = str(clf.classes_[int(np.argmax(probs))])
         prob_map = {str(c): float(p) for c, p in zip(clf.classes_, probs)}
         # Keep payload small — top-3 only; the full probs vector is available
         # via /smell/classify for anyone who needs it.
