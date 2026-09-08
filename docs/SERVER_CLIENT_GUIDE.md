@@ -104,6 +104,19 @@ New flags:
 | `--live-label coffee` | Tag each published sample with this label so the server can separate runs in the ring buffer. |
 | `--record-session path.npz` | Tee the sample stream into a `.npz` file while publishing. Works with `--live` or menu option 8. |
 
+For a baseline-relative model, first let the client fill at least one stable
+minute of clean-air data, then click **Set clean-air baseline** in the server
+UI. Per-frame `--live-classify` results are intentionally withheld after a
+server restart until this has been done; a training-time baseline is not a safe
+substitute for today's physical sensor baseline.
+
+The same baseline is required before Idea-1 online learning with a
+baseline-relative model. The server compresses each confirmed capture to at
+most five stable, zero-aware median windows and stores an exposure/session ID.
+It rejects strongly changing chunks instead of permanently adding a transient
+to model history. The client still saves all raw frames locally for temporal
+research and audit.
+
 ### Replaying a recorded session
 
 `scripts/replay.py` reads a `.npz` from `--record-session` and re-plays
@@ -224,10 +237,21 @@ curl -X POST http://localhost:8080/smell/test_console \
 ### Option 4: Batch CSV training
 
 ```bash
-curl -X POST http://localhost:8080/smell/learn_from_csv \
-  -H "Content-Type: application/json" \
-  -d "{\"csv_data\": \"$(cat your_data.csv)\", \"target_column\": \"Gas name\", \"use_augmentation\": true, \"n_augmentations\": 5}"
+jq -n --rawfile csv your_data.csv '{
+  csv_data: $csv,
+  target_column: "Gas name",
+  training_profile: "plateau",
+  classifier_backend: "balanced_rf",
+  baseline_mode: "logratio",
+  use_augmentation: false,
+  n_augmentations: 0
+}' | curl -X POST http://localhost:8080/smell/learn_from_csv \
+  -H "Content-Type: application/json" --data-binary @-
 ```
+
+The plateau profile requires timestamps and R1–R17, but not environmental
+sensors. It retains stable pre-exposure air and late analyte windows and drops
+the transitions. See [`MODEL_IMPROVEMENTS.md`](MODEL_IMPROVEMENTS.md).
 
 ### Option 5: Offline client menu
 
@@ -362,15 +386,13 @@ compatible with plain TCP forwarders / proxies that may not handle WS.
 ```
 POST /sensor/live/push
 Body: {
-  "entry": {
-    "ts": float,                       # epoch seconds
-    "values": {"R1": float, ..., "CH2O": float},
-    "label": str | null,               # optional tag (e.g. "coffee")
-    "prediction": str | null,          # optional, from --live-classify
-    "confidence": float | null         # optional, 0..1
-  }
+  "sample": {"R1": float, ..., "CH2O": float},
+  "client_t": float | null,
+  "label": str | null,                 # optional tag (e.g. "coffee")
+  "classify": bool,
+  "session_id": str | null
 }
-Returns: {id: int}     # monotonic buffer ID assigned to this entry
+Returns: {ok: true, id: int, buffered: int}
 
 GET /sensor/live/recent?since=<id>&limit=<n>
 Returns: {
@@ -394,6 +416,21 @@ The UI's **Live** tab polls `/sensor/live/recent` once per second with the
 last-seen `next_since`, then draws three inline-SVG charts (R sensors,
 environmental, confidence over time coloured by prediction) plus a drift
 panel that re-hits `/smell/drift`.
+
+The same tab provides two inference paths. **Fast prediction** averages short
+median bins over an adjustable 5, 10, 15, or 30 second window, marks a changing
+response as provisional, and returns `unknown` when confidence or the top-two
+margin is too small. **Classify stable window** is the stricter 60-second
+measurement used for evaluation. **Check recovery** requires both a small
+`abs(log(R/R0))` distance from clean air and a low response slope before the
+next exposure.
+
+```
+POST /smell/baseline/live?window=60
+POST /smell/classify_window?window=15&bin_seconds=5
+POST /smell/classify_stable?window=60
+GET  /smell/recovery?window=15
+```
 
 ---
 

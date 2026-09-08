@@ -272,6 +272,20 @@ columns are optional. **Merge with historical training data** is checked by
 default for Idea 1. Uncheck it only when you intentionally want this CSV to
 replace the model and canonical training history; the UI asks for confirmation.
 
+For a continuous timestamped recording, choose **Stable plateaus**,
+**Balanced RF + baseline**, and **Log ratio to clean air**. Leave augmentation
+and SNV off. This excludes onset/recovery transitions and prevents adjacent
+rows from leaking across the validation split. Before live inference, stream
+stable clean air and click **Set clean-air baseline** in the Live tab. Full
+details and the independent-session benchmark are in
+[`MODEL_IMPROVEMENTS.md`](MODEL_IMPROVEMENTS.md).
+
+For lower latency, the Live tab also has an adjustable 5/10/15/30-second
+**Fast prediction**. It aggregates several short windows and may answer
+`unknown` when the evidence is weak. Treat it as a provisional robot decision;
+use **Classify stable window** for reported evaluation results. Click **Check
+recovery** before starting the next exposure.
+
 **Python client:** menu **5** ("Learn from CSV"). It prompts for a path and uploads the file.
 
 CSV format: 22 sensor columns + 1 label column. Column names must match the server's expected features (see `data/enose_points_1906.csv` in the repo for a reference file). Menu **4** on the client or the **Model Info** tab shows which classes / features the server currently knows.

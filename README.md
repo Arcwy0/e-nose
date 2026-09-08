@@ -80,6 +80,12 @@ command is identical to the local case above, just with a different
 | Live stream to UI | Client: `--live` · UI: **Live** tab |
 | Replay a recorded session | `python scripts/replay.py session.npz --server http://…` |
 
+For continuous labelled recordings, use the UI's **Stable plateaus** profile
+with **Balanced RF + baseline** and **Log ratio to clean air**. It removes
+transition/recovery leakage and supports R1–R17-only datasets. See
+[`docs/MODEL_IMPROVEMENTS.md`](docs/MODEL_IMPROVEMENTS.md) for the live-baseline
+workflow and independent-session benchmark.
+
 ## Live streaming, drift, and replay
 
 * **Client — live dashboard:** run the client with `--live` (or pick menu
@@ -142,6 +148,10 @@ docs/
 | `/` | GET | Server status JSON |
 | `/health` | GET | Liveness check |
 | `/smell/classify` | POST | Classify named-sensor dict (+ OOD block) |
+| `/smell/baseline/live` | POST | Capture a stable clean-air baseline from the live buffer |
+| `/smell/classify_window` | POST | Fast aggregated 5–120 s prediction with confidence abstention |
+| `/smell/classify_stable` | POST | Classify the median of a stable live window |
+| `/smell/recovery` | GET | Check return to the captured clean-air baseline |
 | `/smell/test_console` | POST | Classify 22 comma-separated values |
 | `/smell/debug_input` | POST | Diagnostics (z-scores, OOD, centroids) |
 | `/smell/online_learning` | POST | Incremental training |
@@ -184,6 +194,7 @@ Third-party components keep their own licenses:
 
 - [**Setup guide**](docs/SETUP.md) — clone → venv → download Florence-2 → first classification
 - [**PC migration guide**](docs/MIGRATION.md) — move code, weights, trained models, data, and configuration safely
+- [**Stable/drift-robust training**](docs/MODEL_IMPROVEMENTS.md) — plateau extraction, recommended settings, live workflow, and benchmark
 - [Chemist guide](docs/CHEMIST_GUIDE.md) — no Python needed
 - [Server + Client integration guide](docs/SERVER_CLIENT_GUIDE.md) — developer reference
 - [Classifier internals](enose/classifier/README.md)
