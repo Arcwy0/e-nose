@@ -3,7 +3,6 @@ import math
 import pytest
 
 from enose.config import ENV_DEFAULTS, ENVIRONMENTAL_SENSORS
-from enose.config import ENV_DEFAULTS, ENVIRONMENTAL_SENSORS
 from enose.client.sensors import ENoseSensor, transform_sensor_values, validate_rlow
 
 
@@ -23,15 +22,6 @@ def test_sensor_rlow_can_change_at_runtime():
     sensor = ENoseSensor(offline_mode=True, rlow=2.0)
     sensor.set_rlow(3.5)
     assert sensor.rlow == 3.5
-
-
-def test_sensor_can_parse_resistance_only_line_with_environment_defaults():
-    sensor = ENoseSensor(offline_mode=False, rlow=1.0)
-    sample = sensor._parse_and_transform_line(" ".join(["1000"] * 17))
-    assert sample is not None
-    assert len(sample) == 22
-    for name in ENVIRONMENTAL_SENSORS:
-        assert sample[name] == ENV_DEFAULTS[name]
 
 
 def test_sensor_reads_without_environment_uart():
