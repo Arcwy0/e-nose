@@ -8,13 +8,41 @@ from __future__ import annotations
 
 import os
 import traceback
+from contextlib import contextmanager, nullcontext
+from importlib.util import find_spec
 from typing import Any, Optional, Tuple
+from unittest.mock import patch
 
 import torch
 from PIL import Image
 from transformers import AutoModelForCausalLM, AutoProcessor
 
 from enose.config import VLM_MODEL_PATH
+
+
+@contextmanager
+def _eager_imports_without_flash_attention():
+    """Allow Florence's conditional flash import when the extension is absent.
+
+    Transformers 4.44.2's regex scanner treats the import inside
+    ``if is_flash_attn_2_available()`` as mandatory. Florence's eager model
+    does not execute that branch without flash-attn. Filter only that model's
+    scanner result, and restore the original scanner immediately after load.
+    Installed FlashAttention (the reference Docker/Linux configuration) is
+    neither skipped nor replaced.
+    """
+    from transformers import dynamic_module_utils
+
+    original = dynamic_module_utils.get_imports
+
+    def eager_imports(filename):
+        imports = original(filename)
+        if os.path.basename(os.fspath(filename)) == "modeling_florence2.py":
+            return [name for name in imports if name != "flash_attn"]
+        return imports
+
+    with patch.object(dynamic_module_utils, "get_imports", eager_imports):
+        yield
 
 
 def load_florence_model(device: str, model_path: str = VLM_MODEL_PATH) -> Tuple[Any, Any]:
@@ -30,16 +58,22 @@ def load_florence_model(device: str, model_path: str = VLM_MODEL_PATH) -> Tuple[
         # `Florence2ForConditionalGeneration.__init__() got an unexpected
         # keyword argument 'dtype'` — the model constructor received a stray
         # kwarg because from_pretrained didn't consume it.
-        model = (
-            AutoModelForCausalLM.from_pretrained(
-                model_path,
-                torch_dtype=dtype,
-                trust_remote_code=True,
-                attn_implementation="eager",
-            )
-            .eval()
-            .to(device)
+        import_context = (
+            _eager_imports_without_flash_attention()
+            if find_spec("flash_attn") is None
+            else nullcontext()
         )
+        with import_context:
+            model = (
+                AutoModelForCausalLM.from_pretrained(
+                    model_path,
+                    torch_dtype=dtype,
+                    trust_remote_code=True,
+                    attn_implementation="eager",
+                )
+                .eval()
+                .to(device)
+            )
         # `use_fast=False` forces the Python (slow) tokenizer, built from
         # vocab.json + merges.txt. The fast path reads tokenizer.json through
         # the Rust `tokenizers` library, which in our pinned version

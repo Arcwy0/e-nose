@@ -1,0 +1,4 @@
+# Keep the client independently installable without the server's ML stack.
+pyserial>=3.5
+matplotlib>=3.7
+opencv-python>=4.8

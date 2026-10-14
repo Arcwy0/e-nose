@@ -1,0 +1,5 @@
+# Build tools for the same FlashAttention install in Docker, pip, and uv.
+ninja==1.13.2
+packaging==26.3
+setuptools==75.1.0
+wheel==0.45.1

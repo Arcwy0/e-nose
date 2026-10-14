@@ -1,0 +1,15 @@
+# Direct server dependencies. Transitive versions live in server-lock.txt.
+fastapi==0.119.1
+uvicorn[standard]==0.52.4
+pydantic==2.13.5
+python-multipart==0.0.32
+numpy==1.26.4
+pandas==2.3.3
+scipy==1.13.1
+scikit-learn==1.5.2
+joblib==1.6.0
+matplotlib==3.10.9
+pillow==12.3.0
+requests==2.34.2
+pyserial==3.5
+opencv-python-headless==4.11.0.86

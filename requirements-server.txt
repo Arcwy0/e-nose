@@ -1,0 +1,4 @@
+# Canonical Docker / pip / uv runtime lock (full server including Florence-2).
+# Exact +cu124 builds prevent uv/pip from choosing different Torch wheels.
+--extra-index-url https://download.pytorch.org/whl/cu124
+-r requirements/server-lock.txt
