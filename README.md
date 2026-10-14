@@ -1,6 +1,6 @@
 # E-Nose — Vision + Smell Multimodal Classification
 
-A robotic olfaction system combining a **Florence-2** vision model with a **22-feature electronic nose** (17 resistance sensors + 5 environmental). Runs on a Unitree Go-1 robot dog.
+A robotic olfaction system combining a **Florence-2** vision model with a **17-channel electronic nose**, with five optional environmental channels. Runs on a Unitree Go-1 robot dog; smell models can use R1–R17 only.
 
 ## Architecture
 
@@ -13,7 +13,7 @@ A robotic olfaction system combining a **Florence-2** vision model with a **22-f
                    │ REST / JSON
 ┌──────────────────▼──────────────────────────────────┐
 │  Client  (laptop / robot)                           │
-│  ├── ENoseSensor   (dual UART: e-nose + env)        │
+│  ├── ENoseSensor   (e-nose UART; env optional)     │
 │  ├── WebcamHandler (OpenCV capture)                 │
 │  └── TrainingPipeline (interactive CLI)             │
 └─────────────────────────────────────────────────────┘
@@ -25,6 +25,58 @@ A robotic olfaction system combining a **Florence-2** vision model with a **22-f
 > it walks through the venv, `pip install`, Florence-2 download, and
 > `.env` setup. The steps below assume that's done.
 
+### Install the server — one lock for Docker, pip, and uv
+
+Use **64-bit Python 3.10–3.12** on Windows/Linux; Python 3.10 matches Docker.
+`requirements-server.txt` locks the complete runtime, including Torch
+**2.4.1+cu124**, torchvision **0.19.1+cu124**, Transformers **4.44.2**, and
+tokenizers **0.19.1**. Keep the server and hardware client in separate environments.
+
+**Windows PowerShell, fresh server environment:**
+
+```powershell
+py -3.10 -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install --upgrade "pip==24.3.1"
+python -m pip install -r requirements-server.txt
+python -m pip install --no-deps -e .
+python -m pip check
+```
+
+**Linux, fresh server environment:**
+
+```bash
+python3.10 -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade "pip==24.3.1"
+python -m pip install -r requirements-server.txt
+python -m pip install --no-deps -e .
+python -m pip check
+```
+
+**uv alternative, same runtime versions:**
+
+```bash
+uv venv --python 3.10 .venv
+uv pip sync --python .venv requirements-server.txt
+uv pip install --python .venv --no-deps -e .
+uv pip check --python .venv
+```
+
+Use `uv pip sync` with this lock; `uv sync` is not the documented installation
+path. Activate the environment before the commands below. Docker installs
+this same lock and retains **FlashAttention 2.7.3**. Native Windows, or Linux
+without a CUDA compiler, uses the tested eager-attention fallback. Native Linux
+CUDA extension installation is described in [`docs/SETUP.md`](docs/SETUP.md#flashattention--retained-for-docker--linux-cuda).
+
+For an existing installation, create a fresh environment from the lock rather
+than upgrading individual ML libraries. The old **3.2.0 wheel does not contain
+the 3.2.1 dependency/loader fixes**; client-only users can continue using it.
+
+Florence weights, trained smell models, and experimental datasets are separate
+from the wheel and source checkout. Follow the [download instructions](docs/SETUP.md#3-download-florence-2-large)
+and [migration guide](docs/MIGRATION.md) when moving PCs.
+
 ### 1 — Server (classifier only, no GPU / VLM required)
 
 ```bash
@@ -34,15 +86,48 @@ ENOSE_NO_VLM=1 python scripts/run_server.py
 ENOSE_NO_VLM=1 python scripts/run_server.py --reload
 ```
 
-Open **http://localhost:8080/ui** in any browser for the point-and-click interface.
+Windows PowerShell:
+
+```powershell
+$env:ENOSE_NO_VLM = "1"
+python scripts/run_server.py --host 0.0.0.0 --port 8016
+```
+
+Open **http://localhost:8080/ui** for the default port, or
+**http://localhost:8016/ui** for the PowerShell example.
 
 ### 2 — Server (full, with VLM)
 
 ```bash
+unset ENOSE_NO_VLM
+python scripts/verify_server_environment.py --vlm
 python scripts/run_server.py
 ```
 
-Requires Florence-2 weights at `model/Florence-2-Large/`.
+Windows PowerShell:
+
+```powershell
+$env:ENOSE_NO_VLM = "0"
+python scripts/verify_server_environment.py --vlm
+python scripts/run_server.py --host 0.0.0.0 --port 8016
+```
+
+Requires Florence-2 weights at `model/Florence-2-Large/`. The verification command
+checks library versions, runs real server startup, and generates a caption.
+Use `--device cpu` or `--device cuda` to select the verification device explicitly.
+CPU inference is supported; a CUDA GPU improves latency. Set `--host 127.0.0.1`
+for access only from this PC, or `0.0.0.0` for LAN access. If a port is busy,
+choose another with `--port`; remote clients connect to the PC's IP, not `0.0.0.0`.
+
+Docker uses the same runtime lock:
+
+```bash
+docker build -t enose-server -f docker/Dockerfile-cu124 .
+docker run --rm --gpus all -p 8016:8080 -v "$PWD":/app -w /app \
+  -e PYTHONPATH=/app -e ENOSE_NO_VLM=0 enose-server python scripts/run_server.py
+```
+
+For Docker smell-only mode, omit `--gpus all` and set `ENOSE_NO_VLM=1`.
 
 ### 3 — Client (offline / simulated sensors)
 
@@ -72,7 +157,7 @@ command is identical to the local case above, just with a different
 
 | What you want | How |
 |---|---|
-| Classify a single sample | Browser UI → **Classify** tab, paste 22 values |
+| Classify a single sample | Browser UI → **Classify** tab, paste 17 resistance values or all 22 values |
 | Classify via API | `POST /smell/test_console` with `{"values": "v1,v2,...,v22"}` |
 | Train on CSV data | Browser UI → **Train** tab, upload/paste CSV |
 | Train via API | `POST /smell/learn_from_csv` |
@@ -126,6 +211,7 @@ enose/
 scripts/
 ├── run_server.py          — uvicorn launcher
 ├── run_client.py          — client entry point
+├── verify_server_environment.py — locked versions + real VLM startup/inference
 └── smoke_test.py          — AST + export validation
 
 docs/
@@ -152,7 +238,7 @@ docs/
 | `/smell/classify_window` | POST | Fast aggregated 5–120 s prediction with confidence abstention |
 | `/smell/classify_stable` | POST | Classify the median of a stable live window |
 | `/smell/recovery` | GET | Check return to the captured clean-air baseline |
-| `/smell/test_console` | POST | Classify 22 comma-separated values |
+| `/smell/test_console` | POST | Classify 17 or 22 comma-separated values |
 | `/smell/debug_input` | POST | Diagnostics (z-scores, OOD, centroids) |
 | `/smell/online_learning` | POST | Incremental training |
 | `/smell/learn_from_csv` | POST | Batch CSV training |

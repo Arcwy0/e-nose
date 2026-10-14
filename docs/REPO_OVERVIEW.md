@@ -113,6 +113,7 @@ robot/policy.py (Idea-1 FSM) ─────────────────
 | `sim_targets.json` | Example target list (label, aliases, waypoints, world pose, detection score) |
 | `audit_auto_labels.py` | Inspect autonomous-training commits (`list` / `inspect <id>` / `low-score`) |
 | `smoke_test.py` | AST-parse all modules; catches syntax/import-surface breakage without heavy deps |
+| `verify_server_environment.py` | Check the shared version lock and, with `--vlm`, load real weights and generate a caption |
 
 ---
 
@@ -137,10 +138,11 @@ docker run --rm --network enose-net -v "$(pwd)":/app -e PYTHONPATH=/app \
 python scripts/run_client.py --offline --server http://localhost:18080
 ```
 
-Install extras (see `SETUP.md`): server = `pip install -e ".[server,classifier-extras]"`
-(+`,vision` for Florence-2); client = `pip install -e ".[client]"`.
+Install the server lock (see `SETUP.md`): `pip install -r requirements-server.txt`
+then `pip install --no-deps -e .`. Docker and uv use the same complete pins.
+Client-only = `pip install -e ".[client]"` in a separate environment.
 
-Prebuilt client wheel for Windows colleagues: `dist/enose-3.2.0-py3-none-any.whl`
+Prebuilt client wheel for Windows colleagues: `dist/enose-3.2.1-py3-none-any.whl`
 → see [`CLIENT_WINDOWS_INSTALL.md`](CLIENT_WINDOWS_INSTALL.md).
 
 ---

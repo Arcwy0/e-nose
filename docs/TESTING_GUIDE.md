@@ -46,6 +46,28 @@ docker build -t enose-server -f docker/Dockerfile-cu124 .
 
 If the build fails on `flash-attn==2.7.3`, free up RAM (the build caps at `MAX_JOBS=4` nvcc workers but still needs ~16 GB).
 
+The server image installs `requirements-server.txt`, the same exact runtime
+lock used by native pip and uv environments. Check the versions and exercise
+real VLM startup/processor/inference before running longer robot tests:
+
+```bash
+docker run --rm --gpus all -v "$PWD":/app -w /app -e PYTHONPATH=/app \
+  enose-server python scripts/verify_server_environment.py --vlm --device cuda
+```
+
+For a native server, install the lock as described in [`SETUP.md`](SETUP.md),
+activate its environment, and run `python scripts/verify_server_environment.py --vlm`.
+Add `--device cpu` to test CPU inference explicitly. The probe uses temporary
+working files; existing trained models and datasets are not overwritten.
+The source-only `smoke_test.py` checks syntax/exports, not VLM compatibility.
+
+Dependency alignment was verified on Linux with real model startup and caption
+generation in pip and uv environments on CPU/GPU, and in the rebuilt Docker
+image with FlashAttention 2.7.3. All 82 shared locked runtime versions matched,
+and the complete test suite passed (33 tests). Windows/Linux binary-wheel
+resolution was checked for Python 3.10, 3.11, and 3.12; actual native Windows
+execution remains a colleague-side check.
+
 ### 1.3 Client image — `enose-client` *(~2 min)*
 
 ```bash

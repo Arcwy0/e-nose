@@ -66,8 +66,10 @@ For a complete native installation (server, classifier, and Florence vision):
 ```bash
 python -m venv .venv
 source .venv/bin/activate             # Windows: .\.venv\Scripts\Activate.ps1
-python -m pip install --upgrade pip
-pip install -e ".[server,classifier-extras,vision,client]"
+python -m pip install --upgrade "pip==24.3.1"
+python -m pip install -r requirements-server.txt
+python -m pip install --no-deps -e .
+python scripts/verify_server_environment.py
 python scripts/smoke_test.py
 ```
 
@@ -80,6 +82,13 @@ pip install -e ".[client]"
 CUDA, Docker, Windows, and USB-serial details are covered in
 [`SETUP.md`](SETUP.md), [`SERVER_CLIENT_GUIDE.md`](SERVER_CLIENT_GUIDE.md), and
 [`CLIENT_WINDOWS_INSTALL.md`](CLIENT_WINDOWS_INSTALL.md).
+
+The server lock is shared with Docker and uv, including transitive packages.
+Use Python 3.10 for the closest match to Docker (3.11/3.12 are also supported).
+For uv, use `uv pip sync --python .venv requirements-server.txt`, then
+`uv pip install --python .venv --no-deps -e .`. Keep the hardware client in a
+separate environment. Native Linux CUDA builds can also install the pinned
+FlashAttention extension as described in `SETUP.md`; Windows uses eager attention.
 
 ## 4. Restore or download Florence-2
 
@@ -100,6 +109,12 @@ ENOSE_NO_VLM=1 python scripts/run_server.py
 For an offline move, copy the complete `model/Florence-2-Large/` directory and
 verify that at least `config.json`, tokenizer files, processor configuration,
 and a `.safetensors` or `.bin` weight file arrived.
+
+Verify real VLM startup and generation after the weights arrive:
+
+```bash
+python scripts/verify_server_environment.py --vlm
+```
 
 ## 5. Restore configuration and experimental state
 

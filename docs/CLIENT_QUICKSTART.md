@@ -2,6 +2,11 @@
 
 Everything a colleague needs to use the lab server.
 
+This guide installs the hardware/API **client**. To host the server (with or
+without Florence-2) on your own PC, use [`SETUP.md`](SETUP.md): the server has
+a separate complete dependency lock shared by Docker, pip, and uv. Keep the
+client and server in separate environments.
+
 > **Server URL:** the lab admin will share the base URL with you privately
 > (something like `http://<host>:<port>`). In the examples below, replace
 > `<SERVER_URL>` with whatever they give you — e.g.
@@ -35,8 +40,8 @@ Open in any browser:
 
 | Tab | What to do there |
 |---|---|
-| **Classify** | Paste 22 comma-separated sensor values → predicted smell + confidence + OOD traffic light |
-| **Train** | Upload / paste a CSV (22 sensor columns + a label column) → retrain the model |
+| **Classify** | Paste 17 resistance values or all 22 values → predicted smell + confidence + OOD traffic light |
+| **Train** | Upload / paste a CSV (R1–R17 + label; environmental columns optional) → retrain the model |
 | **Live** | Click **Start polling** — shows live sensor charts + drift panel while someone is `--live` streaming |
 | **Model Info** | Known classes, accuracy, per-class P/R/F1, confusion matrix |
 

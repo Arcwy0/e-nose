@@ -2,13 +2,42 @@
 
 ## Starting the server
 
+Install the full shared lock from the repository root (Python 3.10–3.12):
+
+```bash
+python -m pip install -r requirements-server.txt
+python -m pip install --no-deps -e .
+# uv alternative: uv pip sync --python .venv requirements-server.txt
+#                 uv pip install --python .venv --no-deps -e .
+```
+
+The same pinned versions are used by Docker. Docker/Linux CUDA retain the
+separate FlashAttention 2.7.3 extension; native Windows uses eager attention.
+See [`docs/SETUP.md`](../../docs/SETUP.md) for environment creation and weights.
+
 ```bash
 # Smell-only (no VLM, fast start):
 ENOSE_NO_VLM=1 python scripts/run_server.py
 
 # Full (VLM + classifier):
-python scripts/run_server.py --port 8080 --reload
+unset ENOSE_NO_VLM
+python scripts/verify_server_environment.py --vlm
+python scripts/run_server.py --port 8080
 ```
+
+Windows PowerShell, full mode on an alternate port:
+
+```powershell
+$env:ENOSE_NO_VLM = "0"
+python scripts/verify_server_environment.py --vlm
+python scripts/run_server.py --host 0.0.0.0 --port 8016
+```
+
+For smell-only PowerShell use `$env:ENOSE_NO_VLM = "1"`. Change `--host` to
+`127.0.0.1` for local-only access. The default port is 8080; `--port 8016` uses
+`http://localhost:8016/ui`. Follow Uvicorn's listening-address line if the app
+banner still shows its fixed example address. Each server worker loads its
+own model, so keep the default single worker unless memory permits more.
 
 The web UI is at **http://localhost:8080/ui**.  
 Interactive API docs are at **http://localhost:8080/docs**.

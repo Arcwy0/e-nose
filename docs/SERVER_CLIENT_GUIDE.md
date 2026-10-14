@@ -11,6 +11,12 @@ The system has two independent parts that communicate over HTTP:
 
 ## Running the server
 
+Install the complete runtime lock with `pip install -r requirements-server.txt`
+or `uv pip sync --python .venv requirements-server.txt`, then register the
+package using `pip install --no-deps -e .` (or the uv equivalent). This is the
+same pinned runtime Docker installs. See [`SETUP.md`](SETUP.md) for Windows,
+Linux FlashAttention, and `verify_server_environment.py --vlm` instructions.
+
 ### Classifier-only mode (no GPU, no VLM)
 
 Use `ENOSE_NO_VLM=1` to skip loading Florence-2. All smell endpoints work normally. Vision endpoints return HTTP 503.
@@ -19,16 +25,40 @@ Use `ENOSE_NO_VLM=1` to skip loading Florence-2. All smell endpoints work normal
 ENOSE_NO_VLM=1 python scripts/run_server.py
 ```
 
+Windows PowerShell, on a different port:
+
+```powershell
+$env:ENOSE_NO_VLM = "1"
+python scripts/run_server.py --host 0.0.0.0 --port 8016
+```
+
 ### Full mode (VLM + classifier)
 
 ```bash
+unset ENOSE_NO_VLM
+python scripts/verify_server_environment.py --vlm
 python scripts/run_server.py
 # Optional flags:
 #   --host 0.0.0.0      (default)
 #   --port 8080         (default)
 #   --reload            (dev auto-reload)
-#   --workers 4         (production)
+#   --workers 1         (default; each additional worker loads another VLM)
 ```
+
+Windows PowerShell:
+
+```powershell
+$env:ENOSE_NO_VLM = "0"
+python scripts/verify_server_environment.py --vlm
+python scripts/run_server.py --host 0.0.0.0 --port 8016
+```
+
+The default UI is `http://localhost:8080/ui`; with the PowerShell examples it is
+`http://localhost:8016/ui`. `127.0.0.1` binds only locally; `0.0.0.0` listens on
+all interfaces. Remote clients use the server PC's actual IP and port. A Windows
+10048 error means the requested port is occupied: choose another `--port`.
+The application's ready banner has a fixed example address; use Uvicorn's
+listening-address line for the actual host/port.
 
 Florence-2 weights must be in `model/Florence-2-Large/` (set `VLM_MODEL_PATH` in `enose/config.py` to change).
 
