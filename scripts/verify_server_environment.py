@@ -4,6 +4,7 @@
 Run after installing requirements-server.txt and `pip install --no-deps -e .`:
     python scripts/verify_server_environment.py --vlm --device cpu
 No datasets, model weights, or classifier artifacts are changed by the probe.
+The loader may create missing tokenizer text files from the local tokenizer.json.
 """
 
 from __future__ import annotations

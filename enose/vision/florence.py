@@ -18,6 +18,7 @@ from PIL import Image
 from transformers import AutoModelForCausalLM, AutoProcessor
 
 from enose.config import VLM_MODEL_PATH
+from enose.utils.tokenizer_io import ensure_slow_tokenizer_files
 
 
 @contextmanager
@@ -52,6 +53,9 @@ def load_florence_model(device: str, model_path: str = VLM_MODEL_PATH) -> Tuple[
     print(f"  dtype={dtype}")
 
     try:
+        recovered = ensure_slow_tokenizer_files(model_path)
+        if recovered:
+            print(f"  Recovered {', '.join(recovered)} from this model's tokenizer.json")
         # `torch_dtype` is the correct kwarg for transformers < 5.0 (and the
         # version we pin for Florence-2 compatibility is 4.44.2). transformers 5
         # renamed it to `dtype`, which is why this call previously failed with
@@ -113,9 +117,8 @@ def process_image_with_vlm(
 
     full_prompt = f"{prompt} {additional_text}" if additional_text else prompt
 
-    image = Image.open(image_path)
-    if image.mode != "RGB":
-        image = image.convert("RGB")
+    with Image.open(image_path) as source:
+        image = source.convert("RGB")
 
     device = next(vlm_model.parameters()).device
     model_dtype = next(vlm_model.parameters()).dtype
@@ -136,7 +139,14 @@ def process_image_with_vlm(
                 do_sample=False,
                 num_beams=3,
             )
-        generated_text = vlm_processor.batch_decode(generated_ids, skip_special_tokens=False)[0]
+        # Slow BART inserts spaces between added/special tokens by default.
+        # Florence's box parser requires four adjacent <loc_...> tokens;
+        # those extra spaces silently turn valid generations into empty boxes.
+        generated_text = vlm_processor.batch_decode(
+            generated_ids,
+            skip_special_tokens=False,
+            spaces_between_special_tokens=False,
+        )[0]
         return vlm_processor.post_process_generation(
             generated_text, task=prompt, image_size=(image.width, image.height)
         )

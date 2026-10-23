@@ -92,7 +92,9 @@ class WebcamHandler:
                 det = parsed["<OPEN_VOCABULARY_DETECTION>"]
                 bboxes = det.get("bboxes", [])
                 labels = det.get("bboxes_labels", det.get("labels", []))
-                print(f"Detection: {len(bboxes)} object(s)")
+                polygons = det.get("polygons", [])
+                polygon_labels = det.get("polygons_labels", [])
+                print(f"Detection: {len(bboxes)} box(es), {len(polygons)} polygon region(s)")
 
                 for i, (bbox, label) in enumerate(zip(bboxes, labels)):
                     if len(bbox) != 4:
@@ -108,6 +110,29 @@ class WebcamHandler:
                         bbox=dict(facecolor="red", alpha=0.8, pad=2),
                     )
                     print(f"  {i + 1}. {label}: [{x1:.1f}, {y1:.1f}, {x2:.1f}, {y2:.1f}]")
+
+                # OPEN_VOCABULARY_DETECTION can return polygons instead of boxes.
+                for parts, label in zip(polygons, polygon_labels):
+                    for vertices in parts:
+                        if len(vertices) < 6 or len(vertices) % 2:
+                            continue
+                        points = list(zip(map(float, vertices[::2]), map(float, vertices[1::2])))
+                        ax.add_patch(patches.Polygon(
+                            points, closed=True, fill=False, linewidth=2, edgecolor="orange",
+                        ))
+                        ax.text(
+                            points[0][0], points[0][1] - 5, label,
+                            color="white", fontsize=10, weight="bold",
+                            bbox=dict(facecolor="darkorange", alpha=0.8, pad=2),
+                        )
+                    print(f"  polygon: {label}")
+
+                if not bboxes and not polygons:
+                    ax.text(
+                        0.5, 0.5, "No matching regions returned by the model",
+                        transform=ax.transAxes, ha="center", va="center", fontsize=14,
+                        bbox=dict(facecolor="orange", alpha=0.7, pad=3),
+                    )
             else:
                 msg = "No detection data found" if parsed else "Could not parse detection result"
                 color = "yellow" if parsed else "orange"
@@ -125,13 +150,17 @@ class WebcamHandler:
 
 
 def _parse_detection(result):
-    """Accept dict, JSON string, or Python-literal string — return dict or None."""
-    if not isinstance(result, str):
-        return result
-    try:
-        return json.loads(result)
-    except json.JSONDecodeError:
+    """Decode legacy payloads and unwrap the server's /predict/object envelope."""
+    if isinstance(result, str):
         try:
-            return ast.literal_eval(result)
-        except (ValueError, SyntaxError):
-            return None
+            result = json.loads(result)
+        except json.JSONDecodeError:
+            try:
+                result = ast.literal_eval(result)
+            except (ValueError, SyntaxError):
+                return None
+    # The HTTP API returns {prompt, task, result: {<TASK>: {...}}}; old
+    # callers also pass the inner {<TASK>: {...}} directly. Accept both.
+    if isinstance(result, dict) and isinstance(result.get("result"), dict):
+        return result["result"]
+    return result
