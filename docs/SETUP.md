@@ -166,6 +166,10 @@ The model is ~1.6 GB and is **not** committed to this repo. Download it
 into `model/Florence-2-Large/` — the path `enose/config.VLM_MODEL_PATH`
 points at. Pick one of three methods.
 
+For a pinned, tested download and explicit tokenizer repair commands (including
+older v3.2.1 installations), use [Florence model files](FLORENCE_MODEL_FILES.md).
+That guide also explains why downloaded and previously exported folders differ.
+
 ### Method A — `huggingface-cli` (recommended)
 
 ```bash
@@ -206,8 +210,27 @@ Verify the download:
 ```bash
 ls model/Florence-2-Large/
 # Should contain: config.json, model.safetensors (or pytorch_model.bin),
-#                 processor_config.json, tokenizer*, vocab.json, etc.
+#                 preprocessor_config.json, tokenizer.json,
+#                 tokenizer_config.json, vocab.json, and the model's Python code.
 ```
+
+The official snapshot may omit `merges.txt`, `added_tokens.json`, and
+`special_tokens_map.json`. This does **not** mean the download failed. Our slow
+BART tokenizer requires `merges.txt`, so the loader reconstructs it (and
+`vocab.json` if missing) from **this snapshot's own** `tokenizer.json`, preserving
+the vocabulary IDs and BPE merge order. Existing files are never overwritten;
+the model directory must be writable for this one-time recovery. The separate
+added-token and special-token files are optional for the official Florence
+processor; do not copy them from a different model.
+
+`TypeError: expected str, bytes or os.PathLike object, not NoneType` at BART's
+`open(merges_file, ...)` means `merges.txt` is missing, **not** that CUDA is
+required. Update the loader before retrying. No weight redownload or
+FlashAttention installation is needed on CPU. Keep the downloaded
+`configuration_florence2.py`, `modeling_florence2.py`, and
+`processing_florence2.py`; exported folders without those files may depend on
+Hugging Face's code cache or network access. Only one weight format is needed:
+the loader can use `model.safetensors` without also downloading `pytorch_model.bin`.
 
 ### Changing the model path
 

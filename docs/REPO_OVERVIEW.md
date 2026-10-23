@@ -142,7 +142,8 @@ Install the server lock (see `SETUP.md`): `pip install -r requirements-server.tx
 then `pip install --no-deps -e .`. Docker and uv use the same complete pins.
 Client-only = `pip install -e ".[client]"` in a separate environment.
 
-Prebuilt client wheel for Windows colleagues: `dist/enose-3.2.1-py3-none-any.whl`
+Prebuilt client wheel for Windows colleagues: `enose-3.2.2-py3-none-any.whl`
+from [GitHub Releases](https://github.com/Arcwy0/e-nose/releases/latest).
 → see [`CLIENT_WINDOWS_INSTALL.md`](CLIENT_WINDOWS_INSTALL.md).
 
 ---

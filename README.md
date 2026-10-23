@@ -72,6 +72,9 @@ CUDA extension installation is described in [`docs/SETUP.md`](docs/SETUP.md#flas
 For an existing installation, create a fresh environment from the lock rather
 than upgrading individual ML libraries. The old **3.2.0 wheel does not contain
 the 3.2.1 dependency/loader fixes**; client-only users can continue using it.
+Use [release v3.2.2](https://github.com/Arcwy0/e-nose/releases/tag/v3.2.2) for
+the additional tokenizer-file recovery and detection decoding/display fixes.
+Update both the server and camera client; the dependency lock is unchanged.
 
 Florence weights, trained smell models, and experimental datasets are separate
 from the wheel and source checkout. Follow the [download instructions](docs/SETUP.md#3-download-florence-2-large)
@@ -114,6 +117,12 @@ python scripts/run_server.py --host 0.0.0.0 --port 8016
 
 Requires Florence-2 weights at `model/Florence-2-Large/`. The verification command
 checks library versions, runs real server startup, and generates a caption.
+Some official downloads omit `merges.txt`; the loader reconstructs missing
+slow-tokenizer files from that snapshot's own `tokenizer.json`. The model folder
+must be writable for this one-time recovery. Separate `added_tokens.json` and
+`special_tokens_map.json` files are not required for the official snapshot.
+See [Florence model files](docs/FLORENCE_MODEL_FILES.md) for why folders differ,
+the pinned download command, and repair/export instructions for existing installs.
 Use `--device cpu` or `--device cuda` to select the verification device explicitly.
 CPU inference is supported; a CUDA GPU improves latency. Set `--host 127.0.0.1`
 for access only from this PC, or `0.0.0.0` for LAN access. If a port is busy,

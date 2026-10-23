@@ -8,7 +8,7 @@
 # Recommended Python: 3.11 or 3.12 (all wheels below are prebuilt for these).
 #
 #   pip install -r requirements-client.txt
-#   pip install --no-deps enose-3.2.1-py3-none-any.whl   # then add the package itself
+#   pip install --no-deps enose-3.2.2-py3-none-any.whl   # then add the package itself
 #
 # On headless Linux, swap opencv-python for opencv-python-headless.
 

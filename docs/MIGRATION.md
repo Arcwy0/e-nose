@@ -92,6 +92,11 @@ FlashAttention extension as described in `SETUP.md`; Windows uses eager attentio
 
 ## 4. Restore or download Florence-2
 
+Use [Florence model files](FLORENCE_MODEL_FILES.md) for the tested revision,
+the expected file layout, and tokenizer preparation before an offline copy or
+read-only Docker mount. Downloaded and saved/exported folders need not have
+identical contents; the official snapshot omits some separate tokenizer files.
+
 Downloading the official weights again is usually safer than copying them:
 
 ```bash
