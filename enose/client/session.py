@@ -10,9 +10,9 @@ Design goals:
     * One npz per session with stable keys so ``scripts/replay.py`` can load
       sessions from any future client build without a schema migration:
 
-        timestamps   (N,)   float64 — server-clock seconds since epoch
+        timestamps   (N,)   float64 — host acquisition seconds since epoch
         client_t     (N,)   float64 — client-clock seconds (may be NaN)
-        samples      (N, 22) float32 — raw sensor values in ALL_SENSORS order
+        samples      (N, 22) float32 — canonical values, not raw ADC; units in metadata
         sensor_names object       — the column ordering as a 1-D array of strings
         predictions  (N,)   str   — predicted label (empty when classify=False)
         confidences  (N,)   float — max probability (NaN when unknown)
@@ -42,8 +42,8 @@ from enose.config import ALL_SENSORS
 class SessionRecorder:
     """Append-only in-memory recorder.
 
-    Plug into ``LivePublisher(on_complete=recorder.submit)`` (possibly via a
-    tee — see :func:`tee_callbacks`) and call :meth:`save` when done.
+    Plug submit into ``on_sample`` and complete into ``on_complete``. Local
+    recording never waits for HTTP; completed predictions enrich matching rows.
     """
 
     def __init__(
@@ -64,6 +64,14 @@ class SessionRecorder:
         """Callback plugged into the publisher — stashes one frame."""
         with self._lock:
             self._rows.append(copy.deepcopy(entry))
+
+    def complete(self, entry: Dict) -> None:
+        """Enrich an existing locally recorded frame; never drop unsent frames."""
+        with self._lock:
+            for row in reversed(self._rows):
+                if row.get("t") == entry.get("t") and row.get("session_id") == entry.get("session_id"):
+                    row.update(copy.deepcopy(entry))
+                    break
 
     def __len__(self) -> int:
         with self._lock:
@@ -124,6 +132,9 @@ class SessionRecorder:
             confidences=confidences,
             labels=labels,
             acquisition_json=acquisition_json,
+            network_latency_ms=np.array([r.get("network_latency_ms", np.nan) for r in rows], dtype=np.float64),
+            candidate_predictions=np.array([str(r.get("candidate_smell") or "") for r in rows]),
+            decision_confirmed=np.array([bool(r.get("decision_confirmed", False)) for r in rows]),
             session_id=np.array(self.session_id),
             session_label=np.array(self.session_label),
             created_at=np.array(self._created_at),

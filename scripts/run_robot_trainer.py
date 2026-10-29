@@ -218,10 +218,15 @@ def main(argv: List[str] | None = None) -> int:
 
     targets = make_targets(rows)
     print(f"[mission] backend={args.backend}  targets={len(targets)}  server={args.server}")
-    result = run_mission(
-        adapters, targets, config=config, sleep=speed_sleep,
-        on_transition=on_transition, cue_sensor=cue,
-    )
+    from enose.client.lifecycle import sensor_lifecycle
+    result = None
+    with sensor_lifecycle(sensor):
+        result = run_mission(
+            adapters, targets, config=config, sleep=speed_sleep,
+            on_transition=on_transition, cue_sensor=cue,
+        )
+    if result is None:
+        return 130
     print_summary(result.summary)
     return 0 if result.summary["final_state"] == "done" else 1
 

@@ -175,15 +175,19 @@ class TrainingPipeline:
                 print("No data recorded")
                 return False
 
-            self.save_local_data(sensor_data, object_name)
             avg = self.enose_sensor.get_average_reading(sensor_data)
             if avg:
                 self.display_22_feature_sample(avg)
 
             print("Step 4: online learning (stable median windows)")
+            if input(f"Confirm '{object_name}' is the verified sample identity, not just a visual guess (yes/no): ").strip().lower() not in {"yes", "y"}:
+                print("Learning cancelled; visual localization does not establish chemical identity")
+                return False
+            self.save_local_data(sensor_data, object_name)
             result, err = self.server_api.online_learning(
                 sensor_data, object_name,
                 acquisition=self.enose_sensor.get_acquisition_metadata(),
+                session_id=getattr(self.enose_sensor, "client_session_id", None),
             )
             if err:
                 print(f"Online learning failed: {err}")
@@ -241,6 +245,7 @@ class TrainingPipeline:
             self.display_22_feature_sample(reading)
             result, err = self.server_api.classify_smell(
                 reading, acquisition=self.enose_sensor.get_acquisition_metadata(),
+                session_id=getattr(self.enose_sensor, "client_session_id", None),
             )
             if err:
                 print(f"Classification failed: {err}")
@@ -283,7 +288,8 @@ class TrainingPipeline:
                 if not user_input:
                     continue
 
-                result, err = self.server_api.test_console_input(user_input)
+                result, err = self.server_api.test_console_input(
+                    user_input, resistance_unit=getattr(self.enose_sensor, "resistance_unit", None))
                 if err:
                     print(f"Failed: {err}")
                     continue
@@ -339,6 +345,9 @@ class TrainingPipeline:
             merge_history = input(
                 "Merge with historical data? (y/n, default y; n replaces model): "
             ).lower().strip() != "n"
+            stage_candidate = input(
+                "Train a candidate without replacing active model/history? (y/n, default y): "
+            ).lower().strip() != "n"
 
             result, err = self.server_api.learn_from_csv(
                 csv_path,
@@ -352,6 +361,7 @@ class TrainingPipeline:
                 baseline_mode,
                 snv,
                 resistance_unit=getattr(self.enose_sensor, "resistance_unit", "ohm"),
+                stage_candidate=stage_candidate,
             )
             if err:
                 print(f"CSV learning failed: {err}")

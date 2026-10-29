@@ -1,7 +1,7 @@
-"""Continuous USB CDC acquisition. No GUI, heater, flash, or robot control.
+"""Continuous USB CDC acquisition with opt-in monitored PI heater control.
 
-Only GET_INFO/STATUS, runtime Rs mode and stream START/STOP are sent. Heater
-state is deliberately preserved: stopping the stream DOES NOT stop heating.
+No flash, calibration, gain, fixed-duty, or robot commands are sent. Heater
+disable is attempted and verified on disconnect; STREAM_STOP alone is not off.
 """
 
 from __future__ import annotations
@@ -54,6 +54,9 @@ class PCBSensor(ENoseSensor):
         self._io_error = None
         self.last_error = None
         self.dropped_frames = 0
+        self._status_version = 0
+        from .heater import HeaterController
+        self.heater = HeaterController(self)
 
     def set_rlow(self, value):
         raise ValueError("RLOW is legacy-only; PCB firmware already converts ADC to resistance")
@@ -71,6 +74,7 @@ class PCBSensor(ENoseSensor):
             return False
         try:
             self._stop.clear()
+            self.heater.shutdown_verified = False
             self._io_error = None
             self._info, self._status = {}, {}
             self._parser = protocol.StreamParser()
@@ -116,7 +120,7 @@ class PCBSensor(ENoseSensor):
                 # only after the firmware acknowledged the Rs-mode command.
                 self._status["stream_value_mode"] = 0
             print(f"PCB connected: {self.port[0]} @ {self.baud_rate_enose}; output {self.resistance_unit}.")
-            print("Heater settings unchanged. Confirm model training units before classification; RLOW is not applied.")
+            print("Heating is opt-in; heater disable is attempted on exit. No firmware host-loss watchdog is documented.")
             return True
         except (Exception, KeyboardInterrupt) as exc:
             self.last_error = str(exc)
@@ -124,24 +128,27 @@ class PCBSensor(ENoseSensor):
             self.disconnect()
             return False
 
-    def _request(self, command, payload=b""):
+    def _request(self, command, payload=b"", response=None):
         with self._write_lock:
             self._sequence = self._sequence % 255 + 1
             sequence = self._sequence
             with self._condition:
-                self._pending[sequence] = [command, None]
+                self._pending[sequence] = [command, None, None]
             frame = protocol.pack_frame(command, sequence, payload)
             try:
                 if self.serial_conn_enose.write(frame) != len(frame):
                     raise IOError("PCB short serial write")
                 with self._condition:
                     ready = self._condition.wait_for(
-                        lambda: self._pending[sequence][1] is not None or self._io_error,
+                        lambda: (self._pending[sequence][1] is not None and (
+                            self._pending[sequence][1] != 0 or response is None or
+                            self._pending[sequence][2] is not None)) or self._io_error,
                         timeout=self.command_timeout,
                     )
                     status = self._pending[sequence][1]
                     if not ready or self._io_error or status != 0:
                         raise IOError(self._io_error or f"PCB command 0x{command:02x}: ACK {status}")
+                    return copy.deepcopy(self._pending[sequence][2])
             finally:
                 with self._condition:
                     self._pending.pop(sequence, None)
@@ -168,8 +175,15 @@ class PCBSensor(ENoseSensor):
                         pending[1] = payload[1]
                 elif message == protocol.INFO:
                     self._info = protocol.parse_info(payload)
+                    pending = self._pending.get(sequence)
+                    if pending and pending[0] == protocol.GET_INFO:
+                        pending[2] = self._info
                 elif message == protocol.STATUS:
                     self._status = protocol.parse_status(payload)
+                    self._status_version += 1
+                    pending = self._pending.get(sequence)
+                    if pending and pending[0] == protocol.GET_STATUS:
+                        pending[2] = self._status
                 elif message == protocol.STREAM:
                     measurement = protocol.parse_measurement(payload, self._status.get("stream_value_mode"))
                     self._accept_measurement(measurement)
@@ -214,6 +228,7 @@ class PCBSensor(ENoseSensor):
             "dropped_frames": self.dropped_frames, "segment_id": self._segment,
             "config": {key: value for key, value in self._info.items() if key not in ("device_id", "device_name")},
         }
+        self._latest_metadata["heater"] = self.heater.diagnostics()
         self._version += 1
         self.last_error = None
 
@@ -253,6 +268,11 @@ class PCBSensor(ENoseSensor):
                 "environment_source": "uart" if self.port and self.port[1] else "defaults",
             })
 
+    def refresh_status(self):
+        # Unsolicited SEQ=0 telemetry and another request's status never count
+        # as confirmation of heater control. Wait for matching data AND ACK.
+        return self._request(protocol.GET_STATUS, response=protocol.STATUS)
+
     def start_recording_after_confirmation(self, duration_seconds=60, target_samples=100):
         if duration_seconds <= 0 or target_samples <= 0:
             raise ValueError("Recording duration and sample count must be positive")
@@ -268,19 +288,23 @@ class PCBSensor(ENoseSensor):
     def disconnect(self):
         self.stop_recording()
         connection = self.serial_conn_enose
-        if connection and getattr(connection, "is_open", False) and not self._io_error:
-            try:
-                self._request(protocol.STREAM_STOP)
-            except (OSError, AttributeError) as exc:
-                self.last_error = str(exc)
-        self._stop.set()
-        for thread in (self._reader, self._env_reader):
-            if thread and thread is not threading.current_thread():
-                thread.join(timeout=1.0)
-        for connection in (self.serial_conn_enose, self.serial_conn_UART):
-            if connection:
-                connection.close()
-        self.serial_conn_enose = self.serial_conn_UART = None
-        with self._condition:
-            self._latest = None
-            self._pending.clear()
+        try:
+            if connection and getattr(connection, "is_open", False):
+                self.heater.stop()
+            if connection and getattr(connection, "is_open", False) and not self._io_error:
+                try:
+                    self._request(protocol.STREAM_STOP)
+                except (OSError, AttributeError) as exc:
+                    self.last_error = str(exc)
+        finally:
+            self._stop.set()
+            for thread in (self._reader, self._env_reader):
+                if thread and thread is not threading.current_thread():
+                    thread.join(timeout=1.0)
+            for connection in (self.serial_conn_enose, self.serial_conn_UART):
+                if connection:
+                    connection.close()
+            self.serial_conn_enose = self.serial_conn_UART = None
+            with self._condition:
+                self._latest = None
+                self._pending.clear()

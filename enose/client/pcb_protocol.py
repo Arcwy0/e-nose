@@ -14,6 +14,7 @@ SOF = b"\xa5\x5a"
 VERSION = 1
 GET_INFO, GET_STATUS, STREAM_START, STREAM_STOP = 1, 2, 3, 4
 SET_VALUE_MODE = 0x13
+SET_TEMP_SETPOINT, SET_HEATER_ENABLE = 0x05, 0x10
 ACK, INFO, STATUS, STREAM = 0x80, 0x81, 0x82, 0x90
 RESISTANCE_SCALES = {"ohm": 1.0, "kohm": 1e-3, "mohm": 1e-6}
 FAULT_MASK = 0xC7  # Heater faults, calibration mode, temperature open circuits.
@@ -84,12 +85,14 @@ def parse_info(payload: bytes) -> dict:
         "device_id": "-".join(f"{value:08X}" for value in uid),
         "channel_count": payload[14], "gain_count": payload[15],
         "flags": payload[18], "active_temp_sensor": payload[21],
+        "temp_setpoint_c": struct.unpack_from("<h", payload, 19)[0],
         "rf_table_ohm": list(struct.unpack_from("<6i", payload, 31)),
         "tia_map": list(payload[59:76]),
     }
     if len(payload) >= 97:
         result["device_name"] = payload[76:97].split(b"\0", 1)[0].decode("utf-8", errors="replace")
     if len(payload) >= 100:
+        result["heater_enabled"] = bool(payload[97])
         result["stream_value_mode"] = payload[99]
     if len(payload) >= 120:
         result["analog_voltages"] = list(struct.unpack_from("<5f", payload, 100))
@@ -97,6 +100,8 @@ def parse_info(payload: bytes) -> dict:
         result["firmware_version"] = payload[120:136].split(b"\0", 1)[0].decode("ascii", errors="replace")
     if len(payload) >= 138:
         result["gas_lpf_coeff_q12"] = struct.unpack_from("<H", payload, 136)[0]
+    if len(payload) >= 141:
+        result["fixed_duty_enabled"] = bool(payload[138])
     if len(payload) >= 160:
         result["sdadc_gain_cal"] = list(struct.unpack_from("<3f", payload, 141))
     if len(payload) >= 228:
@@ -111,9 +116,17 @@ def parse_info(payload: bytes) -> dict:
 def parse_status(payload: bytes) -> dict:
     if len(payload) < 35:
         raise ValueError("PCB STATUS payload is too short")
-    result = {"flags": payload[8], "uptime_ms": struct.unpack_from("<I", payload)[0]}
+    result = {"flags": payload[8], "uptime_ms": struct.unpack_from("<I", payload)[0],
+              "heater_duty_permille": struct.unpack_from("<h", payload, 9)[0],
+              "temp_setpoint_c": struct.unpack_from("<h", payload, 11)[0],
+              "active_temp_sensor": payload[13]}
+    if len(payload) >= 41:
+        result.update(temp0_c=struct.unpack_from("<h", payload, 35)[0],
+                      temp1_c=struct.unpack_from("<h", payload, 37)[0], heater_enabled=bool(payload[39]))
     if len(payload) >= 44:
         result["stream_value_mode"] = payload[43]
+    if len(payload) >= 49:
+        result["fixed_duty_enabled"] = bool(payload[46])
     return result
 
 

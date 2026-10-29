@@ -7,6 +7,7 @@ or robot commands are issued. A CSV row index is not a hardware frame counter.
 from __future__ import annotations
 
 import re
+import math
 import time
 from pathlib import Path
 
@@ -60,13 +61,17 @@ class PCBReplaySensor(PCBSensor):
             return None
         sample = {name: float(row[name]) for name in RESISTANCE_SENSORS}
         sample.update(ENV_DEFAULTS)
+        def diagnostic(name):
+            value = row.get(name)
+            return float(value) if value is not None and pd.notna(value) and math.isfinite(float(value)) else None
         self._delivered_metadata = {
             "backend": "replay", "resistance_unit": self.resistance_unit, "environment_source": "defaults",
             "device_id": self.path.stem, "valid": True, "frame_index": self._row_index,
             "received_at": time.time(), "sample_age_seconds": 0.0, "stale_after_seconds": self.stale_after,
             "dropped_frames": 0, "segment_id": 0,
-            "temp0_c": float(row.get("pcb_temp_actual_c", 0)),
-            "duty_permille": float(row.get("pcb_duty_permille", 0)), "flags": 0,
+            # CSV gives active temperature, not the physical feedback index.
+            "temp_actual_c": diagnostic("pcb_temp_actual_c"),
+            "duty_permille": diagnostic("pcb_duty_permille"), "flags": 0,
             "source_timestamp": str(row["Timestamp"]),
             "config": {"synthetic_frame_index": True,
                        "timestamp_date_known": self.report["timestamp_date_known"],

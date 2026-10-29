@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import math
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import pandas as pd
@@ -18,8 +19,13 @@ Result = Tuple[Optional[Any], Optional[str]]
 class ServerAPI:
     """Thin HTTP wrapper. Every call returns (payload, error) — exactly one is None."""
 
-    def __init__(self, base_url: str = DEFAULT_SERVER_URL) -> None:
+    def __init__(self, base_url: str = DEFAULT_SERVER_URL, vision_timeout: float = 30.0,
+                 scene_timeout: float = 60.0) -> None:
         self.base_url = base_url.rstrip("/")
+        if not all(math.isfinite(v) and v > 0 for v in (vision_timeout, scene_timeout)):
+            raise ValueError("Vision timeouts must be positive finite seconds")
+        self.vision_timeout = float(vision_timeout)
+        self.scene_timeout = float(scene_timeout)
 
     def _handle_response(self, response: requests.Response) -> Result:
         try:
@@ -68,7 +74,8 @@ class ServerAPI:
         except Exception as e:
             return None, f"Model info error: {e}"
 
-    def set_baseline(self, air_samples: List[Dict[str, float]], ema: bool = False) -> Result:
+    def set_baseline(self, air_samples: List[Dict[str, float]], ema: bool = False,
+                     acquisition=None, session_id=None) -> Result:
         """Register this session's clean-air baseline for drift-robust models.
 
         Call once at session start with ~30–60 s of clean-air readings. No-op
@@ -78,7 +85,8 @@ class ServerAPI:
         try:
             r = requests.post(
                 f"{self.base_url}/smell/baseline",
-                json={"sensor_data": air_samples, "ema": bool(ema)},
+                json={"sensor_data": air_samples, "ema": bool(ema),
+                      "acquisition": acquisition, "session_id": session_id},
                 timeout=15,
             )
             return self._handle_response(r)
@@ -151,7 +159,7 @@ class ServerAPI:
                 data = {"text": f"Find {object_name}"}
                 r = requests.post(
                     f"{self.base_url}/predict/object",
-                    files=files, data=data, timeout=30,
+                    files=files, data=data, timeout=self.vision_timeout,
                 )
             return self._handle_response(r)
         except FileNotFoundError:
@@ -177,7 +185,7 @@ class ServerAPI:
                 data = {"labels": json.dumps(list(labels))}
                 r = requests.post(
                     f"{self.base_url}/predict/scene",
-                    files=files, data=data, timeout=60,
+                    files=files, data=data, timeout=self.scene_timeout,
                 )
             return self._handle_response(r)
         except FileNotFoundError:
@@ -188,13 +196,16 @@ class ServerAPI:
             return None, f"Scene detection error: {e}"
 
     # ── Classification ────────────────────────────────────────────────────
-    def classify_smell(self, sensor_data: Dict[str, float], acquisition: Optional[Dict[str, Any]] = None) -> Result:
+    def classify_smell(self, sensor_data: Dict[str, float], acquisition: Optional[Dict[str, Any]] = None,
+                       session_id=None) -> Result:
         try:
             if len(sensor_data) != N_FEATURES:
                 print(f"Warning: expected {N_FEATURES} features, got {len(sensor_data)}")
             payload = dict(sensor_data)
             if acquisition is not None:
                 payload["acquisition"] = acquisition
+            if session_id is not None:
+                payload["session_id"] = session_id
             r = requests.post(f"{self.base_url}/smell/classify", json=payload, timeout=5)
             return self._handle_response(r)
         except requests.exceptions.Timeout:
@@ -202,7 +213,7 @@ class ServerAPI:
         except Exception as e:
             return None, f"Classification error: {e}"
 
-    def test_console_input(self, sensor_values: str) -> Result:
+    def test_console_input(self, sensor_values: str, resistance_unit=None) -> Result:
         try:
             values = [float(x.strip()) for x in sensor_values.split(",")]
             if len(values) not in (17, N_FEATURES):
@@ -215,7 +226,7 @@ class ServerAPI:
         try:
             r = requests.post(
                 f"{self.base_url}/smell/test_console",
-                json={"values": sensor_values}, timeout=10,
+                json={"values": sensor_values, "resistance_unit": resistance_unit}, timeout=10,
             )
             return self._handle_response(r)
         except requests.exceptions.Timeout:
@@ -230,6 +241,7 @@ class ServerAPI:
         object_name: str,
         provenance: Optional[Dict[str, Any]] = None,
         acquisition: Optional[Dict[str, Any]] = None,
+        session_id=None,
     ) -> Result:
         """Commit a labelled batch. ``provenance`` is an optional audit-trail
         dict matching the server's ``CommitProvenance`` schema — see
@@ -246,6 +258,8 @@ class ServerAPI:
                 payload["provenance"] = provenance
             if acquisition is not None:
                 payload["acquisition"] = acquisition
+            if session_id is not None:
+                payload["session_id"] = session_id
             r = requests.post(
                 f"{self.base_url}/smell/online_learning",
                 json=payload, timeout=30,
@@ -284,6 +298,7 @@ class ServerAPI:
         baseline_mode: str = "none",
         snv: bool = False,
         resistance_unit: str = "ohm",
+        stage_candidate: bool = False,
     ) -> Result:
         try:
             df = pd.read_csv(csv_file_path)
@@ -312,6 +327,7 @@ class ServerAPI:
                 "baseline_mode": baseline_mode,
                 "snv": snv,
                 "resistance_unit": resistance_unit,
+                "stage_candidate": stage_candidate,
             }
             mode = "merge history" if merge_history else "replace history"
             print(f"Sending CSV learning request: {mode}, aug={use_augmentation}(n={n_augmentations})")

@@ -32,6 +32,7 @@ from __future__ import annotations
 import queue
 import copy
 import json
+import math
 import threading
 import time
 import uuid
@@ -77,16 +78,26 @@ class LivePublisher:
         http_timeout: float = 2.0,
         pose_lookup: Optional[Callable[[], Optional[Dict[str, float]]]] = None,
         on_complete: Optional[Callable[[Dict], None]] = None,
+        prediction_confirmations: int = 1,
     ) -> None:
         self.sensor = sensor
         self.server_url = server_url.rstrip("/") if server_url else ""
         self.rate_hz = max(0.5, float(rate_hz))
         self.classify = bool(classify)
         self.session_id = uuid.uuid4().hex[:12]
+        self.sensor.client_session_id = self.session_id
         self.session_label = session_label
         self.on_sample = on_sample
         self.on_complete = on_complete
         self._timeout = http_timeout
+        if not math.isfinite(http_timeout) or http_timeout <= 0 or prediction_confirmations < 1:
+            raise ValueError("HTTP timeout must be finite and positive; prediction confirmations must be >= 1")
+        self.prediction_confirmations = int(prediction_confirmations)
+        self._candidate = None
+        self._candidate_count = 0
+        self._network_queue = queue.Queue(maxsize=1)
+        self._network_stop = threading.Event()
+        self._network_thread = None
         # When set, called once per tick to get the robot's current pose;
         # the returned dict (or None) is attached to the live-buffer push so
         # every sample is spatially anchored. Required for Idea 2 / nice for
@@ -101,6 +112,8 @@ class LivePublisher:
         self.n_pushed: int = 0
         self.n_push_failed: int = 0
         self.n_read_failed: int = 0
+        self.n_waiting: int = 0
+        self.n_network_dropped: int = 0
         self.last_error: Optional[str] = None
 
     # ── lifecycle ─────────────────────────────────────────────────────────
@@ -108,6 +121,10 @@ class LivePublisher:
         if self._thread and self._thread.is_alive():
             return
         self._stop.clear()
+        self._network_stop.clear()
+        if self.server_url:
+            self._network_thread = threading.Thread(target=self._network_loop, daemon=True)
+            self._network_thread.start()
         self._thread = threading.Thread(target=self._loop, daemon=True)
         self._thread.start()
 
@@ -115,6 +132,9 @@ class LivePublisher:
         self._stop.set()
         if self._thread and self._thread.is_alive():
             self._thread.join(timeout=join_timeout)
+        self._network_stop.set()
+        if self._network_thread and self._network_thread.is_alive():
+            self._network_thread.join(timeout=max(join_timeout, 2 * self._timeout + 1))
 
     @property
     def running(self) -> bool:
@@ -123,9 +143,9 @@ class LivePublisher:
     # ── worker loop ───────────────────────────────────────────────────────
     def _loop(self) -> None:
         period = 1.0 / self.rate_hz
-        next_tick = time.time()
+        next_tick = time.monotonic()
         while not self._stop.is_set():
-            now = time.time()
+            now = time.monotonic()
             if now < next_tick:
                 # Fine-grained wait so Ctrl-C isn't blocked for a whole period.
                 self._stop.wait(min(period, next_tick - now))
@@ -143,6 +163,7 @@ class LivePublisher:
                 "sample": sample,
                 "session_id": self.session_id,
                 "label": self.session_label,
+                "acquired_monotonic": time.monotonic(),
             }
             metadata = getattr(self.sensor, "get_acquisition_metadata", None)
             if callable(metadata):
@@ -168,12 +189,43 @@ class LivePublisher:
                 except Exception:  # pragma: no cover — defensive
                     pass
             if self.server_url:
-                self._push(sample_t, sample, entry, pose=pose)
-            if self.on_complete is not None:
                 try:
-                    self.on_complete(copy.deepcopy(entry))
-                except Exception:  # pragma: no cover — defensive
-                    pass
+                    self._network_queue.put_nowait(entry)
+                except queue.Full:
+                    try:
+                        self._network_queue.get_nowait()
+                        self.n_network_dropped += 1
+                    except queue.Empty:
+                        pass
+                    self._network_queue.put_nowait(entry)
+            else:
+                self._complete(entry)
+
+    def _complete(self, entry):
+        if self.on_complete is not None:
+            try:
+                self.on_complete(copy.deepcopy(entry))
+            except Exception:  # pragma: no cover — defensive
+                pass
+
+    def _network_loop(self):
+        while not self._network_stop.is_set() or not self._network_queue.empty():
+            try:
+                entry = self._network_queue.get(timeout=0.1)
+            except queue.Empty:
+                continue
+            started = time.monotonic()
+            self._push(entry["t"], entry["sample"], entry, pose=entry.get("pose"))
+            entry["network_latency_ms"] = 1000 * (time.monotonic() - started)
+            prediction = entry.get("predicted")
+            if prediction:
+                self._candidate_count = self._candidate_count + 1 if prediction == self._candidate else 1
+                self._candidate = prediction
+                entry["candidate_smell"] = prediction
+                entry["decision_confirmed"] = self._candidate_count >= self.prediction_confirmations
+                if not entry["decision_confirmed"]:
+                    entry["predicted"] = "unknown"
+            self._complete(entry)
 
     def _lookup_pose(self) -> Optional[Dict[str, float]]:
         if self.pose_lookup is None:
@@ -198,7 +250,7 @@ class LivePublisher:
             self.n_read_failed += 1
             return None
         if s is None or len(s) == 0:
-            self.n_read_failed += 1
+            self.n_waiting += 1
             return None
         return s
 
@@ -220,7 +272,15 @@ class LivePublisher:
         if pose is not None:
             payload["pose"] = pose
         if entry.get("acquisition"):
-            payload["acquisition"] = entry["acquisition"]
+            acquisition = copy.deepcopy(entry["acquisition"])
+            queued_age = (time.monotonic() - entry["acquired_monotonic"]
+                          if "acquired_monotonic" in entry else time.time() - t)
+            acquisition["sample_age_seconds"] = float(acquisition.get("sample_age_seconds", 0)) + max(0, queued_age)
+            if acquisition["sample_age_seconds"] > float(acquisition.get("stale_after_seconds", float("inf"))):
+                entry["prediction_error"] = "Sample became stale before publication; not sent for inference"
+                self.n_network_dropped += 1
+                return
+            payload["acquisition"] = acquisition
         prediction_received = False
         try:
             r = requests.post(
@@ -392,6 +452,18 @@ class LiveSensorPlot:
             sharex=True,
         )
         self._axes = list(axes) if hasattr(axes, "__iter__") else [axes]
+        heater = getattr(self, "heater", None)
+        if heater is not None:
+            from matplotlib.widgets import Button
+            self._heater_buttons = [Button(self._fig.add_axes([0.12, 0.01, 0.24, 0.04]), "Enable PI heater"),
+                                    Button(self._fig.add_axes([0.40, 0.01, 0.24, 0.04]), "Disable / verify zero")]
+            def enable(_event):
+                try:
+                    heater.start()
+                except Exception as exc:
+                    print(f"[heater] Enable refused: {exc}")
+            self._heater_buttons[0].on_clicked(enable)
+            self._heater_buttons[1].on_clicked(lambda _event: heater.stop())
         self._fig.canvas.mpl_connect("close_event", lambda _evt: self._closed.set())
 
         period = 1.0 / max(1.0, refresh_hz)
@@ -544,6 +616,9 @@ def run_live_dashboard(
     classify: bool = False,
     session_label: Optional[str] = None,
     record_path: Optional[str] = None,
+    http_timeout: float = 2.0,
+    prediction_confirmations: int = 1,
+    headless: bool = False,
 ) -> None:
     """Kick off publisher + plot (+ recorder) together. Blocks until the window closes.
 
@@ -563,6 +638,7 @@ def run_live_dashboard(
         subtract_baseline=subtract_baseline,
         show_confidence=classify,
     )
+    plot.heater = sensor.heater if getattr(sensor, "backend", None) == "pcb" else None
 
     recorder: Optional[SessionRecorder] = None
     if record_path:
@@ -571,7 +647,7 @@ def run_live_dashboard(
             session_label=session_label,
         )
 
-    completed_callback = tee_callbacks(plot.complete, recorder.submit if recorder else None)
+    completed_callback = tee_callbacks(plot.complete, recorder.complete if recorder else None)
 
     pub = LivePublisher(
         sensor=sensor,
@@ -579,8 +655,10 @@ def run_live_dashboard(
         rate_hz=rate_hz,
         classify=classify,
         session_label=session_label,
-        on_sample=plot.submit,
+        on_sample=tee_callbacks(plot.submit, recorder.submit if recorder else None),
         on_complete=completed_callback,
+        http_timeout=http_timeout,
+        prediction_confirmations=prediction_confirmations,
     )
     if recorder is not None:
         recorder.session_id = pub.session_id
@@ -593,12 +671,22 @@ def run_live_dashboard(
     )
     pub.start()
     try:
-        plot.run()
+        import matplotlib
+        if headless or matplotlib.get_backend().lower() in ("agg", "module://matplotlib_inline.backend_inline"):
+            print("[live] Headless publishing active; use browser Live tab. Ctrl+C stops acquisition.")
+            while pub.running:
+                if getattr(sensor, "backend", None) == "replay" and sensor._rows is not None and sensor._row_index >= len(sensor._rows):
+                    print("[live] Replay reached the end of the recording")
+                    break
+                time.sleep(0.1)
+        else:
+            plot.run()
     finally:
         pub.stop()
         print(
             f"[live] stopped — pushed={pub.n_pushed} push_failed={pub.n_push_failed} "
-            f"read_failed={pub.n_read_failed} last_error={pub.last_error}"
+            f"read_failed={pub.n_read_failed} waiting={pub.n_waiting} "
+            f"network_samples_skipped={pub.n_network_dropped} last_error={pub.last_error}"
         )
         if recorder is not None and len(recorder) > 0:
             recorder.save()

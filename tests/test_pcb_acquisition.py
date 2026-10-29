@@ -92,7 +92,7 @@ class PCBIntegrityTests(unittest.TestCase):
         self.assertEqual(frames[0], (protocol.STREAM, 3, measurement()))
         self.assertGreater(parser.rejected_headers, 0)
 
-    def test_handshake_handles_ack_order_without_heater_or_flash_commands(self):
+    def test_handshake_handles_ack_order_and_shutdown_disables_without_flash(self):
         usb = FakeUSB()
         sensor = PCBSensor(port=("SIMULATED_PCB", None), command_timeout=0.5)
         with patch("enose.client.pcb.serial.Serial", return_value=usb):
@@ -108,7 +108,7 @@ class PCBIntegrityTests(unittest.TestCase):
                 self.assertEqual(sensor.get_acquisition_metadata()["temp0_c"], 285)
             finally:
                 sensor.disconnect()
-        self.assertEqual(usb.commands, [1, 2, 0x13, 3, 4])
+        self.assertEqual(usb.commands, [1, 2, 0x13, 3, 0x10, 2, 4])
         self.assertFalse(usb.is_open)
 
     def test_resistance_is_scaled_once_not_passed_through_rlow(self):
@@ -157,7 +157,7 @@ class PCBIntegrityTests(unittest.TestCase):
 
     def test_csv_replay_never_opens_serial_or_repeats_a_row(self):
         frame = pd.DataFrame({**{f"rs_ch{i}_ohm": [100, 200] for i in range(17)},
-                              "timestamp_iso": ["18:00:00.0", "18:00:02.0"], "temp_actual_c": [285, 285]})
+                              "timestamp_iso": ["18:00:00.0", "18:00:02.0"], "temp_actual_c": [285, None]})
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "recording.csv"
             frame.to_csv(path, index=False)
@@ -165,7 +165,11 @@ class PCBIntegrityTests(unittest.TestCase):
             with patch("enose.client.pcb.serial.Serial", side_effect=AssertionError("No hardware allowed")):
                 self.assertTrue(sensor.connect())
                 self.assertEqual(sensor.read_single_measurement()["R1"], 100)
+                self.assertEqual(sensor.get_acquisition_metadata()["temp_actual_c"], 285)
+                self.assertNotIn("temp0_c", sensor.get_acquisition_metadata())
                 self.assertEqual(sensor.read_single_measurement()["R1"], 200)
+                self.assertIsNone(sensor.get_acquisition_metadata()["temp_actual_c"])
+                json.dumps(sensor.get_acquisition_metadata(), allow_nan=False)
                 self.assertIsNone(sensor.read_single_measurement())
                 sensor.disconnect()
 

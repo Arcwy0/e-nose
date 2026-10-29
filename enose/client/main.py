@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import argparse
+import json
+import os
 import time
+from pathlib import Path
 
 from enose.config import (
     DEFAULT_BAUD_RATE,
@@ -35,6 +38,9 @@ MAIN MENU
 8. Live sensor stream (plot + push to server)
 9. Replay a recorded session
 10. Set RLOW calibration (legacy only)
+11. Start monitored heater (PCB only; explicit confirmation)
+12. Stop heater and verify zero duty (PCB only)
+13. Acquisition preflight / diagnostic report
 0. Exit
 ================================================================================
 """
@@ -64,6 +70,18 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--rlow", type=float, default=RLOW,
                    help="Load resistance for ADC conversion (default: ENOSE_RLOW or 1.0)")
     p.add_argument("--offline", action="store_true", help="Simulate sensors")
+    p.add_argument("--vision-timeout", type=float, default=float(os.environ.get("ENOSE_VISION_TIMEOUT", "30")),
+                   help="Object detection request deadline in seconds (CPU may need longer)")
+    p.add_argument("--scene-timeout", type=float, default=float(os.environ.get("ENOSE_SCENE_TIMEOUT", "60")))
+    p.add_argument("--preflight", action="store_true", help="Inspect connected acquisition without camera/VLM, then exit")
+    p.add_argument("--diagnostic-report", metavar="PATH", help="Save preflight JSON report locally")
+    p.add_argument("--preflight-seconds", type=float, default=3.0)
+    p.add_argument("--heater-control", choices=["external", "client"], default="external",
+                   help="PCB: supplier-configured PI (default), or explicitly enable using client limits; off requested on exit")
+    p.add_argument("--heater-target-c", type=float, default=300.0, help="PI setpoint in deg C; only written in client mode")
+    p.add_argument("--heater-max-c", type=float, default=350.0, help="Conservative host trip temperature, not a certified hardware limit")
+    p.add_argument("--heater-max-seconds", type=float, default=1800.0)
+    p.add_argument("--heater-shutdown-timeout", type=float, default=240.0, help="Maximum seconds to verify controlled cooldown to zero duty")
     p.add_argument(
         "--live",
         action="store_true",
@@ -83,6 +101,10 @@ def build_parser() -> argparse.ArgumentParser:
                    help="Also call /smell/classify per sample so the plot shows confidence")
     p.add_argument("--live-label",
                    help="Tag every live sample with this label (useful when recording a known odour)")
+    p.add_argument("--live-http-timeout", type=float, default=2.0)
+    p.add_argument("--headless", action="store_true", help="Publish live data without opening a local plot")
+    p.add_argument("--prediction-confirmations", type=int, default=2,
+                   help="Consecutive matching network predictions before a local confirmed label")
     p.add_argument("--record-session", metavar="PATH",
                    help=(
                        "Also save a session recording to this .npz file "
@@ -104,11 +126,14 @@ def _launch_live(args, sensor) -> None:
         classify=args.live_classify,
         session_label=args.live_label,
         record_path=args.record_session,
+        http_timeout=args.live_http_timeout,
+        prediction_confirmations=args.prediction_confirmations,
+        headless=args.headless,
     )
 
 
 def _launch_replay(args) -> None:
-    """Menu 9 — delegates to scripts/replay.py so there's one replay code path.
+    """Menu 9 — uses packaged replay so it works from an installed wheel.
 
     We prompt for the session path here rather than forcing it through CLI
     args so the interactive menu is self-contained.
@@ -117,7 +142,7 @@ def _launch_replay(args) -> None:
     if not path:
         print("Aborted.")
         return
-    from scripts.replay import replay_session
+    from .replay import replay_session
     try:
         replay_session(path, server_url=args.server)
     except Exception as e:
@@ -149,7 +174,16 @@ def main() -> None:
     print(f"E-NOSE VISION-SMELL CLIENT — 22 FEATURES ({mode})")
     print("=" * 80)
 
-    server_api = ServerAPI(args.server)
+    try:
+        server_api = ServerAPI(args.server, vision_timeout=args.vision_timeout, scene_timeout=args.scene_timeout)
+        from .heater import HeaterPolicy
+        heater_policy = HeaterPolicy(args.heater_target_c, args.heater_max_c,
+                                     args.heater_max_seconds, args.heater_shutdown_timeout)
+        if args.heater_control == "client" and (args.sensor_backend != "pcb" or args.offline or args.preflight):
+            raise ValueError("Client heater enable is PCB-only and is never allowed in offline/replay/preflight mode")
+    except ValueError as exc:
+        print(f"Invalid configuration: {exc}")
+        return
     webcam = WebcamHandler(args.camera)
     port_tuple = (args.port_enose, args.port_UART) if (args.port_enose or args.port_UART) else None
     try:
@@ -162,6 +196,30 @@ def main() -> None:
         print(f"Invalid sensor configuration: {exc}")
         return
 
+    if getattr(sensor, "backend", None) == "pcb":
+        sensor.heater.configure(heater_policy)
+    from .lifecycle import sensor_lifecycle
+    with sensor_lifecycle(sensor):
+        _run_client(args, sensor, server_api, webcam)
+
+
+def _preflight(args, sensor, server_api):
+    from .preflight import collect_preflight
+    report = collect_preflight(sensor, server_api, args.preflight_seconds)
+    encoded = json.dumps(report, indent=2, allow_nan=False)
+    print(encoded)
+    if args.diagnostic_report:
+        path = Path(args.diagnostic_report)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if path.exists():
+            raise ValueError("Diagnostic output already exists; choose a new filename")
+        path.write_text(encoded + "\n", encoding="utf-8")
+        print(f"Diagnostic report: {path}")
+
+
+def _run_client(args, sensor, server_api, webcam):
+    mode = "OFFLINE" if args.offline else args.sensor_backend.upper()
+
     print("Testing server connection…")
     info, err = server_api.test_connection()
     if err:
@@ -169,7 +227,7 @@ def main() -> None:
         print(f"Is the server running at {args.server}?")
         # --live against a dead server is still useful (local plot only), so
         # we don't return here when --live is set.
-        if not args.live:
+        if not args.live and not args.preflight:
             return
     info = info if isinstance(info, dict) else {}
     print(f"Server: {info.get('message', 'OK')} v{info.get('version', '?')}")
@@ -188,12 +246,18 @@ def main() -> None:
         print("Sensor connection failed" + (" — try --offline" if not args.offline else ""))
         return
 
+    if args.preflight:
+        _preflight(args, sensor, server_api)
+        return
+    if getattr(sensor, "backend", None) == "pcb":
+        if args.heater_control == "client":
+            sensor.heater.start()
+        else:
+            sensor.heater.observe_external()
+
     # Fast path: --live skips the menu entirely.
     if args.live:
-        try:
-            _launch_live(args, sensor)
-        finally:
-            sensor.disconnect()
+        _launch_live(args, sensor)
         return
 
     # Camera is opened lazily when menu option 1 or 2 is selected.
@@ -206,7 +270,7 @@ def main() -> None:
             calibration = (f"RLOW={sensor.rlow:g}" if sensor.backend == "legacy"
                            else f"resistance unit={sensor.resistance_unit}; firmware conversion")
             print(f"Recording: {args.samples} samples in {args.time}s ({mode}); {calibration}")
-            choice = input("Select (0-10): ").strip()
+            choice = input("Select (0-13): ").strip()
             if choice == "1":
                 pipeline.run_training_cycle()
             elif choice == "2":
@@ -227,10 +291,19 @@ def main() -> None:
                 _launch_replay(args)
             elif choice == "10":
                 _change_rlow(sensor)
+            elif choice in {"11", "12"}:
+                if getattr(sensor, "backend", None) != "pcb":
+                    print("Heater commands are unavailable for legacy, replay and simulation")
+                elif choice == "12":
+                    sensor.heater.stop()
+                elif input(f"Enable PI heating to {args.heater_target_c:g} C, trip at {args.heater_max_c:g} C? (yes/no): ").strip().lower() == "yes":
+                    sensor.heater.start()
+            elif choice == "13":
+                _preflight(args, sensor, server_api)
             elif choice == "0":
                 break
             else:
-                print("Invalid — select 0-10")
+                print("Invalid — select 0-13")
             time.sleep(1)
     except KeyboardInterrupt:
         print("\nInterrupted")
@@ -238,7 +311,6 @@ def main() -> None:
         print("Cleaning up…")
         if webcam.cap is not None:
             webcam.close_camera()
-        sensor.disconnect()
         print("Done.")
 
 
