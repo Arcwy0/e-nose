@@ -28,7 +28,10 @@ from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, field_validator
 
 from enose.config import ALL_SENSORS
-from enose.utils.acquisition import prediction_unit_error
+from enose.utils.acquisition import (
+    acquisition_fingerprint, live_baseline_error, prediction_error_code, prediction_unit_error,
+    resistance_sample_error,
+)
 
 from .. import state
 from ..live_buffer import buffer
@@ -83,10 +86,12 @@ class LivePushPayload(BaseModel):
             "received_at", "sample_age_seconds", "device_id", "firmware_version",
             "temp0_c", "temp1_c", "duty_permille", "flags", "dropped_frames", "source_timestamp",
             "valid", "config", "segment_id", "stale_after_seconds",
+            "heater",
+            "temp_actual_c",
         }
         clean = {k: v for k, v in value.items() if k in allowed}
         for key, item in clean.items():
-            if key == "config":
+            if key in {"config", "heater"}:
                 if not isinstance(item, dict) or len(item) > 32:
                     raise ValueError("acquisition config must contain at most 32 fields")
                 # Short arrays (e.g. 17 per-channel gains) are useful, but
@@ -102,17 +107,14 @@ class LivePushPayload(BaseModel):
         return clean
 
 
-def _run_classifier(sample: Dict[str, float]) -> Optional[Dict[str, Any]]:
+def _run_classifier(sample: Dict[str, float], acquisition=None, session_id=None) -> Optional[Dict[str, Any]]:
     """Best-effort classification. Returns None if the classifier is missing
     or not fitted — never raises, so a publisher with ``classify=true`` doesn't
     crash the whole push when the server happens to be mid-retrain."""
     clf = state.smell_classifier
     if clf is None or not getattr(clf, "is_fitted", False):
         return None
-    mode = getattr(getattr(clf, "config", None), "baseline_mode", "none") or "none"
-    if mode != "none" and not bool(getattr(clf, "live_baseline_captured_", False)):
-        # Do not display predictions made against a stale training-time
-        # fallback as if they belonged to today's live sensor session.
+    if live_baseline_error(clf, acquisition, session_id):
         return None
     try:
         probs = clf.predict_proba(sample)[0]
@@ -160,18 +162,31 @@ async def push_sample(payload: LivePushPayload) -> Dict[str, Any]:
     if payload.acquisition is not None:
         entry["acquisition"] = payload.acquisition
 
-    if payload.classify and (payload.acquisition or {}).get("valid") is not False:
-        unit_error = prediction_unit_error(state.smell_classifier, payload.acquisition)
-        if unit_error:
-            entry["prediction_error"] = unit_error
+    sample_error = resistance_sample_error(clean, payload.acquisition)
+    if sample_error:
+        raise HTTPException(status_code=400, detail=sample_error)
+    clf = state.smell_classifier
+    # Observe identity changes even when classify=false: returning to an old
+    # board later must not resurrect its previously invalidated baseline.
+    baseline_error = live_baseline_error(clf, payload.acquisition, payload.session_id)
+    if payload.classify:
+        error = prediction_unit_error(clf, payload.acquisition) or baseline_error
+        if clf is None or not getattr(clf, "is_fitted", False):
+            error = "No fitted classifier is available; train or load a model first."
+        if error:
+            entry["prediction_error"] = error
+            entry["prediction_error_code"] = prediction_error_code(error)
         else:
-            info = _run_classifier(clean)
+            info = _run_classifier(clean, payload.acquisition, payload.session_id)
             if info:
                 entry.update(info)
+            else:
+                entry["prediction_error"] = "Classifier failed to produce a prediction; inspect server diagnostics."
+                entry["prediction_error_code"] = "inference_failed"
 
     eid = buffer.push(entry)
     result = {"ok": True, "id": eid, "buffered": len(buffer)}
-    result.update({k: entry[k] for k in ("predicted", "confidence", "top3", "prediction_error") if k in entry})
+    result.update({k: entry[k] for k in ("predicted", "confidence", "top3", "prediction_error", "prediction_error_code") if k in entry})
     return result
 
 
@@ -224,4 +239,13 @@ async def stats() -> Dict[str, Any]:
             "max": float(arr.max()),
         }
     sessions = sorted({e.get("session_id") for e in items if e.get("session_id")})
-    return {"n": n, "per_sensor": per, "sessions": sessions}
+    clf = state.smell_classifier
+    latest_acquisition = items[-1].get("acquisition")
+    return {
+        "n": n, "per_sensor": per, "sessions": sessions,
+        "acquisition": latest_acquisition,
+        "acquisition_fingerprint": acquisition_fingerprint(latest_acquisition),
+        "baseline_captured": bool(getattr(clf, "live_baseline_captured_", False)),
+        "baseline_context": getattr(clf, "live_baseline_context_", None),
+        "training_acquisition_provenance": getattr(clf, "acquisition_provenance_", None),
+    }

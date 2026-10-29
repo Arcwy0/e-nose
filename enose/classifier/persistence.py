@@ -29,6 +29,8 @@ def build_save_payload(classifier) -> Dict[str, Any]:
     return {
         "classifier_backend": str(getattr(classifier, "backend_name", "balanced_rf")),
         "acquisition_resistance_unit_": model_resistance_unit(classifier),
+        "acquisition_fingerprints_": list(getattr(classifier, "acquisition_fingerprints_", []) or []),
+        "acquisition_provenance_": dict(getattr(classifier, "acquisition_provenance_", {}) or {}),
         "model": classifier.model,
         "scaler_r": classifier.scaler_r,
         "classes_": classifier.classes_,
@@ -64,6 +66,8 @@ def build_save_payload(classifier) -> Dict[str, Any]:
             getattr(classifier, "validation_strategy_", "unknown")
         ),
         "validation_warning_": getattr(classifier, "validation_warning_", None),
+        "calibration_strategy_": getattr(classifier, "calibration_strategy_", "legacy_or_unknown"),
+        "calibration_fold_groups_": list(getattr(classifier, "calibration_fold_groups_", []) or []),
         # Compact training-set summaries — persisted so /smell/model_info and
         # /smell/class_examples keep working after the server reloads the model
         # from disk (which does not restore last_training_data).
@@ -103,6 +107,8 @@ def save(classifier, out_dir: str = "trained_models") -> str:
         "features": classifier.ALL_SENSORS,
         "classes": list(map(str, classifier.classes_)),
         "resistance_unit": model_resistance_unit(classifier),
+        "acquisition_fingerprints": payload["acquisition_fingerprints_"],
+        "acquisition_provenance": payload["acquisition_provenance_"],
         "balanced_accuracy_last": (
             classifier.training_history["balanced_accuracy"][-1]
             if classifier.training_history["balanced_accuracy"]
@@ -120,6 +126,8 @@ def _load_legacy_estimator(payload, cls) -> "cls":
     obj = cls()
     obj.is_fitted = True
     obj.acquisition_resistance_unit_ = None
+    obj.acquisition_fingerprints_ = []
+    obj.acquisition_provenance_ = {"verified": False, "warning": "Legacy artifact has no acquisition provenance."}
     obj.model = payload
     obj.classes_ = getattr(payload, "classes_", np.array([]))
     obj._legacy_pipeline = True
@@ -162,6 +170,8 @@ def load(path: str, cls) -> "cls":
     obj = cls()
     obj.is_fitted = True
     obj.acquisition_resistance_unit_ = normalize_resistance_unit(payload.get("acquisition_resistance_unit_"))
+    obj.acquisition_fingerprints_ = list(payload.get("acquisition_fingerprints_", []) or [])
+    obj.acquisition_provenance_ = dict(payload.get("acquisition_provenance_", {}) or {})
     obj._legacy_pipeline = False
     obj._use_internal_scaler = True
 
@@ -224,6 +234,8 @@ def load(path: str, cls) -> "cls":
     obj.last_test_size_ = int(payload.get("last_test_size_", 0) or 0)
     obj.validation_strategy_ = str(payload.get("validation_strategy_", "unknown"))
     obj.validation_warning_ = payload.get("validation_warning_")
+    obj.calibration_strategy_ = str(payload.get("calibration_strategy_", "legacy_or_unknown"))
+    obj.calibration_fold_groups_ = list(payload.get("calibration_fold_groups_", []) or [])
 
     # Compact training summaries — empty on legacy payloads (the UI then shows
     # the built-in "Try" examples and an empty distribution until a retrain).
@@ -241,4 +253,5 @@ def load(path: str, cls) -> "cls":
     # A live baseline belongs to one physical session and must never survive a
     # process restart merely because the training fallback was persisted.
     obj.live_baseline_captured_ = False
+    obj.live_baseline_context_ = None
     return obj

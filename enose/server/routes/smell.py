@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import time
-import json
 from typing import Any, Dict, List, Optional
 
 import numpy as np
@@ -14,6 +13,11 @@ from fastapi.responses import JSONResponse
 
 from enose.config import ALL_SENSORS, ENV_DEFAULTS, ENVIRONMENTAL_SENSORS, RESISTANCE_SENSORS
 from enose.utils.plateau import relative_slope_score
+from enose.utils.acquisition import (
+    acquisition_fingerprint, bind_live_baseline, live_baseline_error,
+    model_resistance_unit, normalize_resistance_unit, prediction_unit_error,
+    resistance_sample_error,
+)
 
 from .. import state
 from ..jsonsafe import json_safe
@@ -35,10 +39,11 @@ def _recent_live_frame(window: float, session_id: Optional[str]) -> pd.DataFrame
         raise HTTPException(status_code=409, detail="live sensor data is stale; reconnect or resume acquisition")
     newest = max(float(item.get("t", 0.0)) for item in items)
     items = [item for item in items if float(item.get("t", 0.0)) >= newest - window]
-    from enose.utils.acquisition import prediction_unit_error
     configurations = set()
+    sessions = set()
     for item in items:
         acquisition = item.get("acquisition")
+        sessions.add(item.get("session_id"))
         if not acquisition:
             configurations.add("unknown-legacy-acquisition")
             continue  # Backward-compatible legacy live publishers.
@@ -47,17 +52,21 @@ def _recent_live_frame(window: float, session_id: Optional[str]) -> pd.DataFrame
         unit_error = prediction_unit_error(state.smell_classifier, acquisition)
         if unit_error:
             raise HTTPException(status_code=409, detail=unit_error)
-        configurations.add(json.dumps({key: acquisition.get(key) for key in (
-            "backend", "device_id", "resistance_unit", "segment_id", "config",
-        )}, sort_keys=True))
-    if len(configurations) > 1:
+        sample_error = resistance_sample_error(item.get("sample") or {}, acquisition)
+        if sample_error:
+            raise HTTPException(status_code=409, detail=sample_error)
+        configurations.add((acquisition_fingerprint(acquisition), acquisition.get("segment_id")))
+    if len(configurations) > 1 or len(sessions) > 1:
         raise HTTPException(status_code=409, detail="live window spans acquisition configuration changes; wait for a fresh single-configuration window")
     records: List[Dict[str, Any]] = []
     for item in items:
         sample = dict(item.get("sample") or {})
         sample["_timestamp"] = pd.to_datetime(float(item.get("t", time.time())), unit="s")
         records.append(sample)
-    return pd.DataFrame(records)
+    frame = pd.DataFrame(records)
+    frame.attrs["acquisition"] = items[-1].get("acquisition")
+    frame.attrs["session_id"] = items[-1].get("session_id")
+    return frame
 
 
 def _stable_live_frame(
@@ -143,13 +152,11 @@ def _median_live_sample(frame: pd.DataFrame) -> tuple[Dict[str, float], Dict[str
     return sample, quality
 
 
-def _require_live_baseline(clf) -> None:
-    mode = getattr(getattr(clf, "config", None), "baseline_mode", "none") or "none"
-    if mode != "none" and not bool(getattr(clf, "live_baseline_captured_", False)):
-        raise HTTPException(
-            status_code=409,
-            detail="capture a clean-air baseline for this live session before classifying",
-        )
+def _require_live_baseline(clf, frame=None) -> None:
+    context = frame.attrs if frame is not None else {}
+    error = live_baseline_error(clf, context.get("acquisition"), context.get("session_id"))
+    if error:
+        raise HTTPException(status_code=409, detail=error)
 
 
 @router.get("/class_examples")
@@ -190,11 +197,19 @@ async def classify_smell(sensor_data: SensorData) -> Dict[str, Any]:
     """
     clf = state.require_fitted_classifier()
     try:
-        from enose.utils.acquisition import prediction_unit_error
         unit_error = prediction_unit_error(clf, sensor_data.acquisition)
         if unit_error:
             raise HTTPException(status_code=409, detail=unit_error)
-        data_dict = sensor_data.model_dump(exclude={"acquisition"})
+        data_dict = sensor_data.model_dump(exclude={"acquisition", "session_id"})
+        sample_error = resistance_sample_error(data_dict, sensor_data.acquisition)
+        if sample_error:
+            raise HTTPException(status_code=400, detail=sample_error)
+        if sensor_data.acquisition:
+            baseline_error = live_baseline_error(
+                clf, sensor_data.acquisition, getattr(sensor_data, "session_id", None),
+            )
+            if baseline_error:
+                raise HTTPException(status_code=409, detail=baseline_error)
         # predict()/predict_proba() run process_sensor_data internally
         # (see BalancedRFClassifier._model_input). Pass the raw dict so we
         # don't scale + log1p twice and collapse everything near zero.
@@ -261,6 +276,22 @@ async def test_console_input(data: ConsoleSensorData) -> Dict[str, Any]:
             status_code=400,
             detail=f"Expected 17 or 22 values, got {len(values)}",
         )
+
+    incoming_unit = normalize_resistance_unit(getattr(data, "resistance_unit", None))
+    trained_unit = model_resistance_unit(clf)
+    supplied_unit = getattr(data, "resistance_unit", None)
+    if supplied_unit is not None and incoming_unit is None:
+        raise HTTPException(status_code=400, detail="resistance_unit must be ohm, kohm, or mohm")
+    if trained_unit and incoming_unit is None:
+        raise HTTPException(status_code=409, detail=f"Select resistance_unit={trained_unit}; the model's verified units must be declared for manual input.")
+    if incoming_unit:
+        unit_error = prediction_unit_error(clf, {"resistance_unit": incoming_unit})
+        if unit_error:
+            raise HTTPException(status_code=409, detail=unit_error)
+    if not all(np.isfinite(values)):
+        raise HTTPException(status_code=400, detail="Sensor values must all be finite")
+    if incoming_unit and any(value <= 0 for value in values[:17]):
+        raise HTTPException(status_code=400, detail="Resistance values must all be positive")
 
     sensor_dict: Dict[str, float] = {}
     for i, name in enumerate(RESISTANCE_SENSORS):
@@ -378,11 +409,25 @@ async def set_baseline(data: BaselineData) -> Dict[str, Any]:
     if not hasattr(clf, "update_baseline"):
         return {"applied": False, "baseline_mode": mode,
                 "message": "classifier backend does not support baseline capture"}
+    acquisition = getattr(data, "acquisition", None)
+    if acquisition:
+        error = prediction_unit_error(clf, acquisition)
+        if error:
+            raise HTTPException(status_code=409, detail=error)
+        for sample in data.sensor_data:
+            error = resistance_sample_error(sample, acquisition)
+            if error:
+                raise HTTPException(status_code=400, detail=error)
+    if data.ema and getattr(clf, "live_baseline_captured_", False):
+        error = live_baseline_error(clf, acquisition, getattr(data, "session_id", None))
+        if error:
+            raise HTTPException(status_code=409, detail=error)
     baseline_sample, quality = _median_live_sample(pd.DataFrame(data.sensor_data))
     if quality["n_active_resistance_sensors"] < 12:
         raise HTTPException(status_code=400, detail="fewer than 12 resistance sensors are active")
     baseline = clf.update_baseline([baseline_sample], ema=bool(data.ema))
     clf.live_baseline_captured_ = bool(baseline)
+    bind_live_baseline(clf, acquisition, getattr(data, "session_id", None))
     return {
         "applied": mode != "none",
         "baseline_mode": mode,
@@ -411,6 +456,7 @@ async def set_baseline_from_live(
         raise HTTPException(status_code=409, detail="fewer than 12 resistance sensors are active")
     baseline = clf.update_baseline([baseline_sample], ema=False)
     clf.live_baseline_captured_ = bool(baseline)
+    bind_live_baseline(clf, frame.attrs.get("acquisition"), frame.attrs.get("session_id"))
     mode = getattr(clf.config, "baseline_mode", "none") or "none"
     return {
         "applied": mode != "none",
@@ -432,8 +478,8 @@ async def classify_stable_live_window(
 ) -> Dict[str, Any]:
     """Classify the median of a stable recent window, never a transient frame."""
     clf = state.require_fitted_classifier()
-    _require_live_baseline(clf)
     frame, score = _stable_live_frame(window, session_id, max_relative_slope, min_samples)
+    _require_live_baseline(clf, frame)
     sample, quality = _median_live_sample(frame)
     if quality["n_active_resistance_sensors"] < 12:
         raise HTTPException(status_code=409, detail="fewer than 12 resistance sensors are active")
@@ -472,8 +518,10 @@ async def classify_recent_window(
     """
     compute_started = time.perf_counter()
     clf = state.require_fitted_classifier()
-    _require_live_baseline(clf)
+    if not getattr(clf, "live_baseline_captured_", False):
+        _require_live_baseline(clf)
     frame = _recent_live_frame(window, session_id).sort_values("_timestamp").reset_index(drop=True)
+    _require_live_baseline(clf, frame)
     _require_resistance_columns(frame)
     span = _validate_live_span(frame, window, min_samples)
     score = relative_slope_score(frame)
@@ -536,8 +584,8 @@ async def recovery_status(
 ) -> Dict[str, Any]:
     """Report whether the array has returned to its captured clean-air baseline."""
     clf = state.require_fitted_classifier()
-    _require_live_baseline(clf)
     frame = _recent_live_frame(window, session_id)
+    _require_live_baseline(clf, frame)
     _require_resistance_columns(frame)
     span = _validate_live_span(frame, window, min_samples)
     sample, quality = _median_live_sample(frame)

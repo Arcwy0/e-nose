@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 class SensorData(BaseModel):
@@ -33,6 +33,7 @@ class SensorData(BaseModel):
     H2S: float = 0.0
     CH2O: float = 5.0
     acquisition: Optional[Dict[str, Any]] = None
+    session_id: Optional[str] = None
 
 
 class CommitProvenance(BaseModel):
@@ -61,6 +62,7 @@ class OnlineLearningData(BaseModel):
     labels: List[str]
     provenance: Optional[CommitProvenance] = None
     acquisition: Optional[Dict[str, Any]] = None
+    session_id: Optional[str] = None
 
 
 class BaselineData(BaseModel):
@@ -72,6 +74,27 @@ class BaselineData(BaseModel):
 
     sensor_data: List[Dict[str, float]]
     ema: bool = False
+    acquisition: Optional[Dict[str, Any]] = None
+    session_id: Optional[str] = None
+
+
+class PlateauOptions(BaseModel):
+    """Optional extraction overrides; defaults preserve the existing profile."""
+
+    window_seconds: float = Field(60.0, ge=1, le=86400)
+    stride_seconds: float = Field(60.0, ge=1, le=86400)
+    baseline_tail_seconds: float = Field(600.0, ge=1, le=86400)
+    plateau_fraction: float = Field(0.25, gt=0, le=1)
+    tail_margin_seconds: float = Field(30.0, ge=0, le=86400)
+    max_relative_slope: float = Field(0.002, ge=0, le=1)
+
+
+class ExposureAnnotation(BaseModel):
+    """Operator-verified label on zero-based source rows [start_row, end_row)."""
+
+    start_row: int = Field(ge=0)
+    end_row: int = Field(gt=0)
+    label: str = Field(min_length=1, max_length=128)
 
 
 class CSVLearningData(BaseModel):
@@ -89,6 +112,8 @@ class CSVLearningData(BaseModel):
     # True is the Idea-1 default: retain prior classes/samples and add this CSV.
     # False trains a fresh model and replaces the canonical training history.
     merge_history: bool = True
+    # API keeps immediate training for compatibility; browser defaults to staging.
+    stage_candidate: bool = False
     # ``plateau`` converts a continuous timestamped recording into stable
     # one-minute windows; ``raw`` preserves the historical row-wise behavior.
     training_profile: str = "raw"
@@ -97,9 +122,15 @@ class CSVLearningData(BaseModel):
     classifier_backend: str = "balanced_rf"
     baseline_mode: str = "none"
     snv: bool = False
+    plateau_options: Optional[PlateauOptions] = None
+    recording_date: Optional[str] = None
+    session_id: Optional[str] = Field(None, max_length=128)
+    recording_id: Optional[str] = Field(None, max_length=128)
+    annotations: List[ExposureAnnotation] = Field(default_factory=list)
 
 
 class ConsoleSensorData(BaseModel):
     """Comma-separated 17 resistance values, optionally followed by 5 env values."""
 
     values: str
+    resistance_unit: Optional[str] = None
