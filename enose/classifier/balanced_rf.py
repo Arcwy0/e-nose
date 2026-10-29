@@ -9,6 +9,7 @@ flow or model wiring.
 
 from __future__ import annotations
 
+from copy import deepcopy
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 import numpy as np
@@ -20,7 +21,7 @@ from sklearn.metrics import (
     classification_report,
     confusion_matrix,
 )
-from sklearn.model_selection import GroupShuffleSplit, train_test_split
+from sklearn.model_selection import GroupShuffleSplit, StratifiedGroupKFold
 from sklearn.preprocessing import RobustScaler, StandardScaler
 
 try:
@@ -33,6 +34,35 @@ from enose.config import ALL_SENSORS, ENVIRONMENTAL_SENSORS, RESISTANCE_SENSORS
 from .base import SmellClassifierBase
 from .config import SmellClassifierConfig
 from . import diagnostics, persistence, preprocessing
+
+
+class GroupCalibratedEstimator:
+    """Average group-held-out calibrators with their fold-local preprocessing.
+
+    Inputs are raw resistance/environmental values, not the outer classifier's
+    scaled diagnostic features. Each pair owns a separately fitted pipeline.
+    """
+
+    accepts_raw_features = True
+
+    def __init__(self, folds, features, classes):
+        self.folds = folds
+        self.features = list(features)
+        self.classes_ = np.asarray(classes)
+        self.n_features_in_ = len(self.features)
+
+    def predict_proba(self, X):
+        raw = pd.DataFrame(X, columns=self.features)
+        probabilities = []
+        for worker, calibrator in self.folds:
+            transformed = worker.process_sensor_data(raw)[self.features].values
+            predicted = calibrator.predict_proba(transformed)
+            order = [list(calibrator.classes_).index(label) for label in self.classes_]
+            probabilities.append(predicted[:, order])
+        return np.mean(probabilities, axis=0)
+
+    def predict(self, X):
+        return self.classes_[np.argmax(self.predict_proba(X), axis=1)]
 
 
 class BalancedRFClassifier(SmellClassifierBase):
@@ -60,7 +90,7 @@ class BalancedRFClassifier(SmellClassifierBase):
         self.class_weights_: Dict[str, float] = {}
         self.selected_features: List[str] = list(self.ALL_SENSORS)
         self.original_features: List[str] = list(self.ALL_SENSORS)
-        self.training_history: Dict[str, List[float]] = {"accuracy": [], "balanced_accuracy": []}
+        self.training_history: Dict[str, List[Optional[float]]] = {"accuracy": [], "balanced_accuracy": []}
         self.last_training_data: Optional[pd.DataFrame] = None
 
         # legacy-artifact flags; load() flips these when a pre-dict model is restored
@@ -229,6 +259,7 @@ class BalancedRFClassifier(SmellClassifierBase):
         baseline-relative / SNV steps are no-ops unless the model was trained
         with those options (absolute path stays identical).
         """
+        self._sync_calibration_baselines()
         df = preprocessing.ensure_dataframe(X)
         df = preprocessing.sanitize_environmentals(df, self.config.env_ranges, self.config.env_medians)
         df = preprocessing.order_and_fill_features(df, self.config.env_medians)
@@ -272,7 +303,26 @@ class BalancedRFClassifier(SmellClassifierBase):
         else:
             self.sensor_baseline_ = dict(new)
         self.live_baseline_captured_ = bool(self.sensor_baseline_)
+        self._sync_calibration_baselines()
         return dict(self.sensor_baseline_)
+
+    def _sync_calibration_baselines(self):
+        """Share operator-captured air, restoring fold fallbacks after reset.
+
+        Training/calibration folds retain their own fallback R0. A live capture
+        replaces every fold's R0 with the same current physical reference.
+        """
+        if not getattr(self.model, "accepts_raw_features", False):
+            return
+        if not self.live_baseline_captured_:
+            # Keep outer OOD diagnostics consistent with fold prediction after
+            # identity invalidation or loading an artifact with capture reset.
+            self.sensor_baseline_ = dict(self._original_baseline_)
+        for worker, _ in self.model.folds:
+            worker.sensor_baseline_ = dict(
+                self.sensor_baseline_ if self.live_baseline_captured_ else worker._original_baseline_
+            )
+            worker.live_baseline_captured_ = bool(self.live_baseline_captured_)
 
     def _scaler_is_fitted(self) -> bool:
         """RobustScaler exposes ``center_``, StandardScaler exposes ``mean_``."""
@@ -298,6 +348,102 @@ class BalancedRFClassifier(SmellClassifierBase):
         return df, y
 
     # ── train / online_update ───────────────────────────────────────────────
+    def _fit_preprocessing(self, raw, labels, baseline_groups=None):
+        """Learn every data-dependent transform from these fit rows only."""
+        frame = raw.reset_index(drop=True).copy()
+        self.r_clip_, self.r_median_ = preprocessing.compute_resistance_clip_bounds(frame)
+        mode = getattr(self.config, "baseline_mode", "none") or "none"
+        if mode != "none":
+            self.r_clip_ = {sensor: (-np.inf, np.inf) for sensor in self.RESISTANCE_SENSORS}
+        frame = preprocessing.clean_resistances(frame, self.r_median_, self.r_clip_)
+        self.sensor_baseline_ = {}
+        self._original_baseline_ = {}
+        self.live_baseline_captured_ = False
+        if mode != "none":
+            group = pd.Series(list(baseline_groups)) if baseline_groups is not None else pd.Series("all", index=frame.index)
+            labelled = frame.assign(**{self._label_col: np.asarray(labels)})
+            transformed, baselines = preprocessing.apply_baseline_relative_per_group(
+                labelled, group, mode, air_label=self.config.air_label, label_col=self._label_col,
+            )
+            self.sensor_baseline_ = self._mean_baselines(baselines)
+            self._original_baseline_ = dict(self.sensor_baseline_)
+            frame = transformed[list(self.ALL_SENSORS)]
+            if not self.sensor_baseline_:
+                mode = "none"
+        self._log1p_applied = bool(self.config.use_log1p) and mode not in ("delta", "logratio")
+        if self._log1p_applied:
+            frame = preprocessing.log1p_resistances(frame)
+        if self.config.snv:
+            frame = preprocessing.snv_normalize(frame)
+        self.scaler_r = self._build_scaler()
+        return preprocessing.scale_resistances(frame, self.scaler_r, fit=True)
+
+    def _calibration_folds(self, raw, labels, groups):
+        """Return group-disjoint folds only when every side contains all classes."""
+        if groups is None or len(np.unique(labels)) < 2:
+            return []
+        group_values = np.asarray(groups).astype(str)
+        labels = np.asarray(labels)
+        all_classes = set(labels)
+        for count in range(min(3, len(np.unique(group_values))), 1, -1):
+            splitter = StratifiedGroupKFold(n_splits=count, shuffle=True, random_state=self.config.random_state)
+            try:
+                folds = list(splitter.split(raw, labels, group_values))
+            except ValueError:
+                continue
+            if all(set(labels[fit]) == all_classes and set(labels[cal]) == all_classes for fit, cal in folds):
+                return folds
+        return []
+
+    def _fit_estimator(self, raw, labels, groups=None, baseline_groups=None):
+        """Fit final/holdout estimator; calibration never splits an exposure."""
+        frame = self._fit_preprocessing(raw, labels, baseline_groups)
+        features = self._model_features
+        folds = self._calibration_folds(raw, labels, groups) if self.config.calibrated else []
+        self.calibration_strategy_ = "group_disjoint_fold_local" if folds else "disabled_insufficient_groups" if self.config.calibrated else "disabled"
+        self.calibration_fold_groups_ = []
+        if folds:
+            calibrated = []
+            for fit_indices, cal_indices in folds:
+                cfg = deepcopy(self.config)
+                cfg.calibrated = False
+                worker = type(self)(config=cfg)
+                fit_baselines = np.asarray(baseline_groups)[fit_indices] if baseline_groups is not None else None
+                fitted = worker._fit_preprocessing(raw.iloc[fit_indices], np.asarray(labels)[fit_indices], fit_baselines)
+                fit_labels = pd.Series(np.asarray(labels)[fit_indices])
+                if cfg.use_augmentation and cfg.n_augmentations > 0:
+                    fitted = preprocessing.augment_resistances(fitted, cfg.n_augmentations, cfg.noise_max)
+                    fit_labels = pd.concat([fit_labels] * (cfg.n_augmentations + 1), ignore_index=True)
+                estimator = worker._build_model(y_fit=fit_labels.values)
+                estimator.fit(fitted[features].values, fit_labels.values)
+                worker.is_fitted = True
+                calibration_values = worker.process_sensor_data(raw.iloc[cal_indices])[features].values
+                calibrator = self._make_calibrator(estimator, method=cfg.calibration_method, cv="prefit")
+                calibrator.fit(calibration_values, np.asarray(labels)[cal_indices])
+                calibrated.append((worker, calibrator))
+                group_array = np.asarray(groups).astype(str)
+                self.calibration_fold_groups_.append({
+                    "fit": sorted(set(group_array[fit_indices])),
+                    "calibration": sorted(set(group_array[cal_indices])),
+                })
+            self.model = GroupCalibratedEstimator(calibrated, features, np.unique(labels))
+        else:
+            # Do not quietly replace independent-group calibration with row CV.
+            was_calibrated = self.config.calibrated
+            self.config.calibrated = False
+            try:
+                self.model = self._build_model(y_fit=np.asarray(labels))
+            finally:
+                self.config.calibrated = was_calibrated
+            fit_labels = pd.Series(labels).reset_index(drop=True)
+            fitted = frame
+            if self.config.use_augmentation and self.config.n_augmentations > 0:
+                fitted = preprocessing.augment_resistances(frame, self.config.n_augmentations, self.config.noise_max)
+                fit_labels = pd.concat([fit_labels] * (self.config.n_augmentations + 1), ignore_index=True)
+            self.model.fit(fitted[features].values, fit_labels.values)
+        self.is_fitted = True
+        return frame
+
     def train(
         self,
         X,
@@ -308,21 +454,19 @@ class BalancedRFClassifier(SmellClassifierBase):
         test_size: Optional[float] = None,
         groups: Optional[pd.Series] = None,
         baseline_groups: Optional[pd.Series] = None,
-    ) -> float:
+    ) -> Optional[float]:
         """Fit-from-scratch on (X, y).
 
-        Pipeline (training and inference now agree on every step):
-            sanitize env → order cols → clean_resistances (raw bounds) →
-            [log1p] → split → augment (train only) → fit scaler → transform →
-            fit model.
+        Split raw rows first; learn cleaning, baselines and scaling on the
+        training partition only. Calibration owns additional group-disjoint
+        fold-local preprocessing. Refit deployment state after freezing metrics.
 
         ``groups`` is an optional per-row session / recording id. If provided,
         a `GroupShuffleSplit` is used so no single recording appears in both
         train and test — this is the only reliable way to measure
         generalization when the dataset is a time series of consecutive frames.
-        When ``groups`` is not provided, rows are de-duplicated (rounded to
-        ``config.dedup_round_decimals``) before the stratified split, which
-        removes the worst of the near-neighbor leakage.
+        Without usable independent groups, fit deployment state but return
+        None: a random row split cannot estimate unseen-exposure accuracy.
         """
         if use_augmentation is not None:
             self.config.use_augmentation = bool(use_augmentation)
@@ -334,137 +478,56 @@ class BalancedRFClassifier(SmellClassifierBase):
         X_df, y_series = self._prepare_xy(X, y, verbose=True)
         if y_series is None:
             raise ValueError("Labels required (column 'Gas name' or pass y).")
+        X_df = X_df.reset_index(drop=True)
+        if len(X_df) != len(y_series):
+            raise ValueError("Feature rows and labels must have the same length")
+        for values in (groups, baseline_groups):
+            if values is not None and len(values) != len(X_df):
+                raise ValueError("Group identifiers must align with every feature row")
 
         # Remember the raw (but sanitized/ordered) training frame for online_update.
         self.last_training_data = pd.concat(
             [X_df.copy(), y_series.rename(self._label_col)], axis=1
         )
 
-        # Clip bounds and medians are computed on RAW resistances — the same
-        # space `clean_resistances` sees at inference time.
-        self.r_clip_, self.r_median_ = preprocessing.compute_resistance_clip_bounds(
-            X_df, ignore_zeros=True
-        )
-        # In drift-robust modes the raw winsorize would clip away the day-to-day
-        # magnitude shift that baseline-referencing is meant to cancel (a drifted
-        # session's resistances legitimately fall outside this session's p1–p99).
-        # Disable the raw upper/lower clip and rely on RobustScaler for outliers;
-        # keep the per-sensor median for zero/NaN fill of dead channels.
-        if (getattr(self.config, "baseline_mode", "none") or "none") != "none":
-            self.r_clip_ = {c: (-np.inf, np.inf) for c in self.RESISTANCE_SENSORS}
-        X_df = preprocessing.clean_resistances(X_df, self.r_median_, self.r_clip_)
-
-        # ── Drift-invariant representation (opt-in; no-op when baseline_mode='none') ──
-        # Reference each training GROUP (session/recording) to its OWN clean-air
-        # baseline so multi-session data becomes comparable before pooling. Store a
-        # representative baseline as the inference-time fallback.
-        mode = getattr(self.config, "baseline_mode", "none") or "none"
-        if mode != "none":
-            baseline_source = baseline_groups if baseline_groups is not None else groups
-            grp = (
-                pd.Series(list(baseline_source), index=X_df.index).astype(str)
-                if baseline_source is not None
-                else pd.Series("all", index=X_df.index)
-            )
-            tmp = X_df.copy()
-            tmp[self._label_col] = y_series.values
-            tmp, per_group_baselines = preprocessing.apply_baseline_relative_per_group(
-                tmp, grp, mode, air_label=getattr(self.config, "air_label", "air"),
-                label_col=self._label_col,
-            )
-            X_df = tmp[list(self.ALL_SENSORS)]
-            self._original_baseline_ = self._mean_baselines(per_group_baselines)
-            self.sensor_baseline_ = dict(self._original_baseline_)
-            self.live_baseline_captured_ = False
-            if not self.sensor_baseline_:
-                print(
-                    "[train] baseline_mode set but no clean-air rows found — "
-                    "falling back to absolute features"
-                )
-                mode = "none"  # effective mode: nothing was subtracted
-
-        # log1p: 'delta'/'logratio' skip the standalone log (negatives / already logged).
-        apply_log = bool(self.config.use_log1p) and mode not in ("delta", "logratio")
-        if apply_log:
-            X_df = preprocessing.log1p_resistances(X_df)
-        self._log1p_applied = apply_log
-
-        if getattr(self.config, "snv", False):
-            X_df = preprocessing.snv_normalize(X_df)
-
-        # Train/test split: group-aware when possible, else dedup + stratified.
+        # Split RAW rows before any medians, clipping, baselines or scaling are learned.
         X_train, X_test, y_train, y_test = self._split(
-            X_df, y_series, groups=groups, test_size=test_size
+            X_df, y_series, groups=groups, test_size=test_size,
         )
-
-        if self.config.use_augmentation and self.config.n_augmentations > 0:
-            X_train = preprocessing.augment_resistances(
-                X_train, self.config.n_augmentations, self.config.noise_max
+        group_values = np.asarray(groups).astype(str) if groups is not None else None
+        baseline_values = np.asarray(baseline_groups if baseline_groups is not None else groups) if baseline_groups is not None or groups is not None else None
+        bal_acc = None
+        self.per_class_metrics_ = {}
+        self.confusion_matrix_ = None
+        self.confusion_labels_ = []
+        self.last_test_size_ = 0
+        if len(X_test):
+            train_indices = self._split_train_indices_
+            self._fit_estimator(
+                X_train, y_train,
+                group_values[train_indices] if group_values is not None else None,
+                baseline_values[train_indices] if baseline_values is not None else None,
             )
-            y_train = pd.concat(
-                [y_train] * (self.config.n_augmentations + 1), ignore_index=True
-            )
+            self.classes_ = np.unique(y_train)
+            y_pred = self.model.predict(self._model_input(X_test))
+            acc = float(accuracy_score(y_test, y_pred))
+            bal_acc = float(balanced_accuracy_score(y_test, y_pred))
+            self._log_test_report(y_test, y_pred, acc, bal_acc)
+        else:
+            acc = None
+        self.training_history["accuracy"].append(acc)
+        self.training_history["balanced_accuracy"].append(bal_acc)
 
-        # Fit scaler on the (already-cleaned, possibly log1p'd) training split only.
-        self.scaler_r = self._build_scaler()
-        X_train_s = preprocessing.scale_resistances(X_train, self.scaler_r, fit=True)
-        X_test_s = preprocessing.scale_resistances(X_test, self.scaler_r, fit=False)
-
-        feats = self._model_features
-        # First fit is for honest holdout metrics only.
-        self.model = self._build_model(y_fit=y_train.values)
-        print(
-            f"[train] fitting {type(self.model).__name__} on "
-            f"{len(feats)} features (use_env_sensors="
-            f"{getattr(self.config, 'use_env_sensors', True)}); "
-            f"X_train shape={X_train_s[feats].values.shape}"
-        )
-        self.model.fit(X_train_s[feats].values, y_train.values)
-
-        y_pred = self.model.predict(X_test_s[feats].values)
-        acc = accuracy_score(y_test, y_pred)
-        bal_acc = balanced_accuracy_score(y_test, y_pred)
-
-        self.training_history["accuracy"].append(float(acc))
-        self.training_history["balanced_accuracy"].append(float(bal_acc))
-        self._log_test_report(y_test, y_pred, acc, bal_acc)
-
-        # The evaluated model intentionally excludes complete exposures. Once
-        # metrics are frozen, refit the deployable artifact on every available
-        # window. Otherwise a rigorous group holdout would permanently throw
-        # away a large fraction of scarce physical experiments.
-        X_fit = X_df.reset_index(drop=True)
-        y_fit = y_series.reset_index(drop=True)
-        if self.config.use_augmentation and self.config.n_augmentations > 0:
-            X_fit = preprocessing.augment_resistances(
-                X_fit, self.config.n_augmentations, self.config.noise_max
-            )
-            y_fit = pd.concat(
-                [y_fit] * (self.config.n_augmentations + 1), ignore_index=True
-            )
-        self.scaler_r = self._build_scaler()
-        X_fit_s = preprocessing.scale_resistances(X_fit, self.scaler_r, fit=True)
-        X_all_s = preprocessing.scale_resistances(X_df, self.scaler_r, fit=False)
-
-        # Diagnostics state (z-scores, centroids) represents the complete,
-        # non-augmented physical dataset in the final scaler's space.
-        self.feature_means_ = X_all_s[feats].mean().to_dict()
-        stds = X_all_s[feats].std(ddof=0).replace(0, 1e-9)
-        self.feature_stds_ = stds.to_dict()
-        self.class_centroids_ = (
-            X_all_s.assign(_y=y_series.reset_index(drop=True).values)
-            .groupby("_y")[feats]
-            .mean()
-        )
-
-        self.model = self._build_model(y_fit=y_fit.values)
-        print(f"[train] refitting deployable model on all {len(X_fit_s)} training rows")
-        self.model.fit(X_fit_s[feats].values, y_fit.values)
-        self.classes_ = getattr(self.model, "classes_", np.unique(y_fit.values))
-        self.is_fitted = True
-        self.selected_features = list(feats)
+        # Freeze holdout diagnostics, then refit deployment preprocessing/model.
+        X_all_s = self._fit_estimator(X_df, y_series, group_values, baseline_values)
+        features = self._model_features
+        self.feature_means_ = X_all_s[features].mean().to_dict()
+        self.feature_stds_ = X_all_s[features].std(ddof=0).replace(0, 1e-9).to_dict()
+        self.class_centroids_ = X_all_s.assign(_y=y_series.values).groupby("_y")[features].mean()
+        self.classes_ = getattr(self.model, "classes_", np.unique(y_series))
+        self.selected_features = list(features)
         self._compute_training_summaries()
-        return float(bal_acc)
+        return bal_acc
 
     def _compute_training_summaries(self) -> None:
         """Cache compact per-class training summaries (counts + mean feature
@@ -500,13 +563,7 @@ class BalancedRFClassifier(SmellClassifierBase):
         groups: Optional[pd.Series],
         test_size: float,
     ):
-        """Pick the right split strategy for the available structure.
-
-        Preference order:
-          1. GroupShuffleSplit on ``groups`` (one recording stays in one side).
-          2. Deduplicate near-identical rows, then stratified split.
-          3. Plain stratified split.
-        """
+        """Use an all-class group holdout, or explicitly decline evaluation."""
         if (
             groups is not None
             and self.config.group_shuffle_when_available
@@ -534,70 +591,23 @@ class BalancedRFClassifier(SmellClassifierBase):
                     print("[train] using group-disjoint split with all classes in train and test")
                     self.validation_strategy_ = "group_disjoint_holdout"
                     self.validation_warning_ = None
+                    self._split_train_indices_ = train_idx
+                    self._split_test_indices_ = test_idx
                     return (
                         X_df.iloc[train_idx].reset_index(drop=True),
                         X_df.iloc[test_idx].reset_index(drop=True),
                         y_series.iloc[train_idx].reset_index(drop=True),
                         y_series.iloc[test_idx].reset_index(drop=True),
                     )
-            print(
-                "[train] no group-disjoint split contains every class on both sides; "
-                "falling back to a stratified row split for complete diagnostics "
-                "(metrics may be optimistic for time-series data)"
-            )
-            self.validation_strategy_ = "stratified_row_fallback"
-            self.validation_warning_ = (
-                "No group-disjoint split contains every class on both sides. "
-                "Reported metrics use a row split and may be optimistic because "
-                "adjacent windows from one physical exposure can appear on both sides."
-            )
-        else:
-            self.validation_strategy_ = "stratified_row_holdout"
-            self.validation_warning_ = (
-                "No usable exposure/session groups were provided. Reported metrics "
-                "use a row split and may be optimistic for continuous recordings."
-            )
-
-        X_use = X_df.reset_index(drop=True)
-        y_use = y_series.reset_index(drop=True)
-        if self.config.dedup_before_split:
-            # Round-and-hash to catch frames that are near-duplicates of each
-            # other — the main source of train/test leakage on a continuous
-            # time-series recording.
-            dec = self.config.dedup_round_decimals
-            key_feats = X_use[self.ALL_SENSORS].round(dec).astype(str).agg("|".join, axis=1)
-            key = key_feats.str.cat(y_use.astype(str), sep="||")
-            mask = ~key.duplicated()
-            n_dropped = int((~mask).sum())
-            if n_dropped:
-                print(
-                    f"[train] dedup dropped {n_dropped}/{len(mask)} near-duplicate rows "
-                    f"(round={dec} decimals) before split"
-                )
-            X_use = X_use.loc[mask].reset_index(drop=True)
-            y_use = y_use.loc[mask].reset_index(drop=True)
-
-        # Stratify only when every class has ≥2 samples after dedup.
-        counts = y_use.value_counts()
-        stratify = y_use if (counts.min() >= 2) else None
-        if stratify is None:
-            print("[train] skipping stratification — at least one class has <2 samples")
-
-        split_size = test_size
-        if stratify is not None:
-            # sklearn requires at least one test row per class. This also makes
-            # the confusion matrix cover every learned class for small datasets.
-            n_classes = int(counts.size)
-            requested = int(np.ceil(float(test_size) * len(y_use)))
-            split_size = min(max(requested, n_classes), len(y_use) - n_classes)
-
-        return train_test_split(
-            X_use,
-            y_use,
-            test_size=split_size,
-            random_state=self.config.random_state,
-            stratify=stratify,
+        self.validation_strategy_ = "not_estimable"
+        self.validation_warning_ = (
+            "Unseen-exposure accuracy is not estimable: no group-disjoint holdout "
+            "contains every class in both train and test. Collect independent "
+            "labelled exposures per class. No row-wise substitute is reported."
         )
+        self._split_train_indices_ = np.arange(len(X_df))
+        self._split_test_indices_ = np.asarray([], dtype=int)
+        return X_df.reset_index(drop=True), X_df.iloc[:0].copy(), y_series.reset_index(drop=True), y_series.iloc[:0].copy()
 
     def _log_test_report(self, y_test, y_pred, acc: float, bal_acc: float) -> None:
         """Print confusion matrix + per-class precision/recall/F1 so we see
@@ -690,6 +700,10 @@ class BalancedRFClassifier(SmellClassifierBase):
     # ── predict / predict_proba ─────────────────────────────────────────────
     def _model_input(self, X):
         """Feed legacy pipelines a DataFrame (preserves column names); modern estimators get ndarray."""
+        if getattr(self.model, "accepts_raw_features", False):
+            self._sync_calibration_baselines()
+            frame, _ = self._prepare_xy(X, None)
+            return frame[self._model_features].values
         df = self.process_sensor_data(X)
         feats = self._model_features
         return df[feats] if self._legacy_pipeline else df[feats].values
@@ -815,8 +829,9 @@ class BalancedRFClassifier(SmellClassifierBase):
                 "medians": self.config.env_medians,
             },
             "calibration": {
-                "enabled": self.config.calibrated,
+                "enabled": isinstance(self.model, (CalibratedClassifierCV, GroupCalibratedEstimator)),
                 "method": self.config.calibration_method,
+                "strategy": getattr(self, "calibration_strategy_", "legacy_or_unknown"),
             },
             # Drift-invariant feature representation this model uses (so the UI /
             # operator can see whether it's the absolute or a baseline-relative
@@ -838,6 +853,7 @@ class BalancedRFClassifier(SmellClassifierBase):
             "validation": {
                 "strategy": str(getattr(self, "validation_strategy_", "unknown")),
                 "warning": getattr(self, "validation_warning_", None),
+                "estimable": getattr(self, "validation_strategy_", "unknown") == "group_disjoint_holdout",
             },
             # Full-dataset class balance (not just the last test split's
             # support) so the UI can show how many samples back each class.

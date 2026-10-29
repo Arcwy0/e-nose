@@ -21,7 +21,7 @@ def test_csv_training_can_request_replacement():
     assert request.merge_history is False
 
 
-def test_split_falls_back_when_group_holdout_would_hide_classes():
+def test_split_declines_evaluation_when_group_holdout_would_hide_classes():
     """One contiguous group per class cannot form a class-complete group split."""
     pytest.importorskip("imblearn")
     from enose.classifier.balanced_rf import BalancedRFClassifier
@@ -32,8 +32,11 @@ def test_split_falls_back_when_group_holdout_would_hide_classes():
     X = pd.DataFrame(rng.normal(size=(len(labels), len(ALL_SENSORS))), columns=ALL_SENSORS)
     clf = BalancedRFClassifier()
 
-    _, _, y_train, y_test = clf._split(X, labels, groups=groups, test_size=0.1)
+    X_train, X_test, y_train, y_test = clf._split(X, labels, groups=groups, test_size=0.1)
 
     expected = {"air", "acetone", "ethanol"}
     assert set(y_train) == expected
-    assert set(y_test) == expected
+    assert len(X_train) == len(X)
+    assert X_test.empty and y_test.empty
+    assert clf.validation_strategy_ == "not_estimable"
+    assert "Unseen-exposure accuracy is not estimable" in clf.validation_warning_

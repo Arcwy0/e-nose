@@ -9,6 +9,7 @@ data, rebuild a fresh classifier, fit, save. Returns (ok, balanced_accuracy).
 from __future__ import annotations
 
 import os
+import uuid
 from typing import List, Optional, Tuple
 
 import numpy as np
@@ -90,7 +91,10 @@ def _extract_groups(combined: pd.DataFrame) -> Optional[pd.Series]:
     """
     for col in _GROUP_CANDIDATES:
         if col in combined.columns:
-            s = combined[col].astype(str)
+            values = combined[col]
+            if values.isna().any() or values.astype(str).str.strip().eq("").any():
+                continue  # Missing IDs must not silently form a synthetic "nan" exposure.
+            s = values.astype(str)
             if s.nunique() >= 2:
                 print(f"[training] using '{col}' as group for GroupShuffleSplit ({s.nunique()} groups)")
                 return s
@@ -237,10 +241,15 @@ def retrain_with_all_data(
     baseline_mode: Optional[str] = None,
     snv: Optional[bool] = None,
     acquisition_resistance_unit: Optional[str] = None,
-) -> Tuple[bool, float, Optional[BalancedRFClassifier]]:
+    persist: bool = True,
+) -> Tuple[bool, Optional[float], Optional[BalancedRFClassifier]]:
     """Train fresh, optionally merging prior history, and save canonical history.
 
-    Returns (ok, balanced_accuracy, new_classifier). The new classifier is returned
+    Returns (ok, balanced_accuracy, new_classifier). Accuracy is None when
+    independent-exposure validation is not estimable. ``persist=False`` fits
+    an isolated candidate without changing the active model or history files.
+    Its canonical_training_data_ can be stored by the candidate registry.
+    The new classifier is returned
     so the caller (server) can swap it into its global reference atomically.
 
     Cleanup order (all run before splitting so train and test see the same
@@ -305,6 +314,10 @@ def retrain_with_all_data(
         print(f"[training] {reason} — training on new batch only")
     if resolved_unit:
         combined["resistance_unit"] = resolved_unit
+    if groups is not None:
+        if len(groups) != len(combined):
+            raise ValueError("Explicit groups must cover the complete combined history before filtering")
+        combined["_requested_group"] = list(groups)
 
     # drop rows with unusable labels
     mask = combined["smell_label"].notna() & (combined["smell_label"] != "") & (combined["smell_label"] != "unknown")
@@ -319,6 +332,17 @@ def retrain_with_all_data(
     # turn label-adjacent runs into per-row groups (useless).
     combined = combined.reset_index(drop=True)
     combined["_run_id"] = _auto_run_ids(combined, label_col="smell_label").values
+    if groups is None and _extract_groups(combined) is None:
+        # Persist inferred runs BEFORE capping shuffles them. Reconstructing
+        # runs from shuffled historical rows invents independent exposures.
+        prefix = "inferred-" + uuid.uuid4().hex + "-"
+        inferred = prefix + combined["_run_id"].astype(str)
+        if "exposure_id" in combined:
+            existing = combined["exposure_id"]
+            missing = existing.isna() | existing.astype(str).str.strip().eq("")
+            combined["exposure_id"] = existing.where(~missing, inferred)
+        else:
+            combined["exposure_id"] = inferred
 
     if balance_majority:
         combined = _cap_per_class(
@@ -336,7 +360,7 @@ def retrain_with_all_data(
 
     X_all = combined[ALL_SENSORS]
     y_all = combined["smell_label"]
-    groups = pd.Series(list(groups)).reset_index(drop=True) if groups is not None else _extract_groups(combined)
+    groups = combined["_requested_group"].astype(str).reset_index(drop=True) if groups is not None else _extract_groups(combined)
     baseline_groups = _extract_baseline_groups(combined)
     if groups is None:
         # Fall back to the run-id we stamped before capping. It survived the
@@ -377,15 +401,20 @@ def retrain_with_all_data(
         groups=groups,
         baseline_groups=baseline_groups,
     )
+    if groups.astype(str).str.startswith("inferred-").any():
+        note = "Exposure groups include inferred contiguous-label runs; these are not verified physical exposure identifiers."
+        fresh.validation_warning_ = " ".join(filter(None, (fresh.validation_warning_, note)))
 
-    model_path = fresh.save_model(model_out_dir)
     # Drop the internal run-id column before persisting to CSV — it's
     # regenerated on the next retrain and shouldn't be part of the stored
     # schema.
-    save_training_samples(combined.drop(columns=["_run_id"], errors="ignore"), combined_save_path)
-    print(f"[training] saved model → {model_path}")
-    print(f"[training] saved combined data → {combined_save_path}")
-    return True, float(bal_acc), fresh
+    fresh.canonical_training_data_ = combined.drop(columns=["_run_id", "_requested_group"], errors="ignore").copy()
+    if persist:
+        model_path = fresh.save_model(model_out_dir)
+        save_training_samples(fresh.canonical_training_data_, combined_save_path)
+        print(f"[training] saved model → {model_path}")
+        print(f"[training] saved combined data → {combined_save_path}")
+    return True, float(bal_acc) if bal_acc is not None else None, fresh
 
 
 def list_known_classes(classifier) -> List[str]:
