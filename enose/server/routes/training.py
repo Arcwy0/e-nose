@@ -13,12 +13,14 @@ from typing import Any, Dict, Optional
 
 import pandas as pd
 from fastapi import APIRouter, File, Form, HTTPException, UploadFile
+from starlette.concurrency import run_in_threadpool
 
 from enose.classifier.training import retrain_with_all_data
-from enose.utils.csv_io import parse_uploaded_enose_csv
-from enose.utils.plateau import build_plateau_training_frame
-from enose.utils.quality import analyze_recording_quality, summarize_online_capture
-from enose.utils.acquisition import frame_resistance_unit, normalize_resistance_unit, training_resistance_unit
+from enose.utils.training_preview import prepare_csv_training, csv_training_preview
+from enose.utils.quality import summarize_online_capture
+from enose.utils.acquisition import (frame_resistance_unit, normalize_resistance_unit, training_resistance_unit,
+                                     live_baseline_error, bind_live_baseline, acquisition_provenance)
+from enose.utils.acquisition import resistance_sample_error
 from enose.config import (
     ALL_SENSORS,
     DATA_DIR,
@@ -119,8 +121,17 @@ def _retrain_with_units(*args, **kwargs):
 
 @router.post("/smell/online_learning")
 async def online_learning(data: OnlineLearningData) -> Dict[str, Any]:
+    from .models import deployment_lock
+    async with deployment_lock:
+        return await _online_learning(data)
+
+
+async def _online_learning(data: OnlineLearningData) -> Dict[str, Any]:
     """Incremental training. Retrains from scratch when new classes or weight mismatch appear."""
     clf = state.require_classifier()
+    previous_provenance = dict(getattr(clf, "acquisition_provenance_", {}) or {})
+    previous_fingerprints = list(getattr(clf, "acquisition_fingerprints_", []) or [])
+    previous_fitted = bool(clf.is_fitted)
 
     if not data.sensor_data or not data.labels:
         raise HTTPException(status_code=400, detail="Both sensor_data and labels required")
@@ -128,6 +139,12 @@ async def online_learning(data: OnlineLearningData) -> Dict[str, Any]:
         raise HTTPException(status_code=400, detail="Sensor data and labels length mismatch")
 
     acquisition = data.acquisition or {}
+    if acquisition.get("valid") is False:
+        raise HTTPException(status_code=400, detail="Invalid acquisition cannot enter training history")
+    for sample in data.sensor_data:
+        error = resistance_sample_error(sample, acquisition)
+        if error:
+            raise HTTPException(status_code=400, detail=error)
     incoming_unit = normalize_resistance_unit(acquisition.get("resistance_unit"))
     if acquisition.get("backend") in {"pcb", "replay"} and incoming_unit is None:
         raise HTTPException(status_code=400, detail="PCB/replay online learning requires explicit ohm/kohm/mohm resistance units")
@@ -143,7 +160,12 @@ async def online_learning(data: OnlineLearningData) -> Dict[str, Any]:
     # session drift into the new class instead of cancelling it.
     mode = getattr(getattr(clf, "config", None), "baseline_mode", "none") or "none"
     session_baseline: Optional[Dict[str, float]] = None
+    baseline_context = dict(getattr(clf, "live_baseline_context_", {}) or {})
     if clf.is_fitted and mode != "none":
+        context_error = live_baseline_error(clf, acquisition, data.session_id or (
+                                           data.provenance.session_id if data.provenance else None))
+        if context_error:
+            raise HTTPException(status_code=409, detail=context_error)
         if not bool(getattr(clf, "live_baseline_captured_", False)):
             raise HTTPException(
                 status_code=409,
@@ -209,7 +231,7 @@ async def online_learning(data: OnlineLearningData) -> Dict[str, Any]:
             new_classes, mismatch = _detect_new_classes_or_mismatch(clf, new_labels.unique())
             if new_classes or mismatch:
                 print(f"[online_learning] retraining — new_classes={new_classes}, mismatch={mismatch}")
-                ok, accuracy, fresh = _retrain_with_units(
+                ok, accuracy, fresh = await run_in_threadpool(_retrain_with_units,
                     clf, df, new_labels, use_augmentation=True, n_augmentations=3,
                     acquisition_resistance_unit=incoming_unit,
                 )
@@ -226,7 +248,7 @@ async def online_learning(data: OnlineLearningData) -> Dict[str, Any]:
                 # would train on this single-class batch alone and crash with
                 # "target y needs more than 1 class". retrain_with_all_data pulls
                 # history from the persistent CSV, so training stays multi-class.
-                ok, accuracy, fresh = _retrain_with_units(
+                ok, accuracy, fresh = await run_in_threadpool(_retrain_with_units,
                     clf, df, new_labels, use_augmentation=True, n_augmentations=2,
                     acquisition_resistance_unit=incoming_unit,
                 )
@@ -237,7 +259,7 @@ async def online_learning(data: OnlineLearningData) -> Dict[str, Any]:
                 update_type = "online_update"
         else:
             print("[online_learning] initial training")
-            ok, accuracy, fresh = _retrain_with_units(
+            ok, accuracy, fresh = await run_in_threadpool(_retrain_with_units,
                 clf, df, new_labels,
                 use_augmentation=True,
                 n_augmentations=5,
@@ -263,6 +285,14 @@ async def online_learning(data: OnlineLearningData) -> Dict[str, Any]:
                     f"score={provenance_meta['grounding_score']:.3f}"
                 )
 
+        provenance = acquisition_provenance([acquisition] if acquisition else [])
+        if previous_fitted:
+            provenance["verified"] = bool(provenance["verified"] and previous_provenance.get("verified"))
+            provenance["fingerprints"] = sorted(set(provenance["fingerprints"]) | set(previous_fingerprints))
+            if not provenance["verified"]:
+                provenance["warning"] = "Incoming or historical physical acquisition provenance is incomplete."
+        clf.acquisition_provenance_ = provenance
+        clf.acquisition_fingerprints_ = provenance["fingerprints"]
         model_path = clf.save_model(TRAINED_MODELS_DIR)
         reloaded = reload_smell_classifier()
         clf = state.smell_classifier  # pick up the reloaded instance
@@ -271,6 +301,7 @@ async def online_learning(data: OnlineLearningData) -> Dict[str, Any]:
             # same running session, so reapply the already validated baseline
             # in memory without persisting the captured flag to disk.
             clf.update_baseline([session_baseline], ema=False)
+            bind_live_baseline(clf, acquisition, baseline_context.get("session_id"))
 
         use_env = bool(getattr(getattr(clf, "config", None), "use_env_sensors", False))
 
@@ -305,8 +336,32 @@ async def online_learning(data: OnlineLearningData) -> Dict[str, Any]:
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@router.post("/smell/preview_csv")
+async def preview_csv(data: CSVLearningData) -> Dict[str, Any]:
+    """Inspect exactly the selected CSV windows, without fitting or disk writes."""
+    try:
+        source, selected, target, report = await run_in_threadpool(prepare_csv_training, data, allow_unlabelled=True)
+        preview = await run_in_threadpool(csv_training_preview, source, selected, target, report)
+        clf = state.smell_classifier
+        if data.merge_history and clf is not None and clf.is_fitted and not selected.empty:
+            available = set(preview["class_counts"]) | set(map(str, clf.classes_))
+            if len(available) >= 2:
+                preview["training_ready"] = True
+                preview["message"] = "Selected windows can update the existing classes. History and unit compatibility will be checked during training."
+        return preview
+    except (ValueError, TypeError, KeyError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
 @router.post("/smell/learn_from_csv")
 async def learn_from_csv(data: CSVLearningData) -> Dict[str, Any]:
+    from .models import deployment_lock
+
+    async with deployment_lock:
+        return await _learn_from_csv(data)
+
+
+async def _learn_from_csv(data: CSVLearningData) -> Dict[str, Any]:
     """Train from CSV, merging history by default or replacing it explicitly."""
     clf = state.require_classifier()
 
@@ -314,17 +369,18 @@ async def learn_from_csv(data: CSVLearningData) -> Dict[str, Any]:
         raise HTTPException(status_code=400, detail="CSV data required")
 
     try:
-        df, csv_parse_report = parse_uploaded_enose_csv(
-            data.csv_data, label_column=data.target_column,
-            pcb_resistance_unit=data.resistance_unit,
-        )
+        source, df, target_column, profile_report = await run_in_threadpool(prepare_csv_training, data)
+        csv_parse_report = profile_report["csv_parser"]
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Invalid CSV format: {e}")
 
-    if data.target_column not in df.columns:
+    combined_classes = set(df[target_column])
+    if data.merge_history and clf.is_fitted:
+        combined_classes.update(clf.classes_)
+    if df.empty or len(combined_classes) < 2:
         raise HTTPException(
             status_code=400,
-            detail=f"Target column '{data.target_column}' not found. Available: {df.columns.tolist()}",
+            detail="No valid labelled training windows from at least two classes; use Preview CSV to inspect labels and extraction settings.",
         )
 
     try:
@@ -351,30 +407,8 @@ async def learn_from_csv(data: CSVLearningData) -> Dict[str, Any]:
         raise HTTPException(status_code=400, detail="unsupported baseline_mode")
 
     try:
-        samples_received = len(df)
-        input_quality = analyze_recording_quality(df, data.target_column)
-        input_quality["environment_reliable"] = bool(
-            csv_parse_report.get("environment_reliable", False)
-        )
-        if not input_quality["environment_reliable"]:
-            input_quality["warnings"].append(
-                "environmental fields are absent or ambiguous; training uses R1-R17 only"
-            )
-        profile_report: Dict[str, Any] = {
-            "profile": "raw", "input_rows": samples_received,
-            "csv_parser": csv_parse_report,
-            "input_quality": input_quality,
-        }
-        if profile == "plateau":
-            df, profile_report = build_plateau_training_frame(df, label_col=data.target_column)
-            profile_report["csv_parser"] = csv_parse_report
-            profile_report["input_quality"] = input_quality
-            # The plateau builder emits the canonical label name.
-            target_column = "Gas name"
-        else:
-            target_column = data.target_column
-
-        X = df.drop(columns=[target_column, "Gas label", "Gas class", "timestamp", "Timestamp"], errors="ignore")
+        samples_received = len(source)
+        X = df.drop(columns=[target_column, "Gas label", "Gas class", "timestamp", "Timestamp", "_source_row", "_label_block"], errors="ignore")
         y = df[target_column].astype(str)
         if data.lowercase_labels:
             y = y.str.lower()
@@ -383,7 +417,7 @@ async def learn_from_csv(data: CSVLearningData) -> Dict[str, Any]:
         new_classes = set(y.unique()) - existing_classes
         mismatch = False
 
-        ok, accuracy, fresh = _retrain_with_units(
+        ok, accuracy, fresh = await run_in_threadpool(_retrain_with_units,
             clf, X, y,
             use_augmentation=data.use_augmentation,
             n_augmentations=data.n_augmentations,
@@ -392,9 +426,36 @@ async def learn_from_csv(data: CSVLearningData) -> Dict[str, Any]:
             baseline_mode=baseline_mode,
             snv=data.snv,
             acquisition_resistance_unit=incoming_unit,
+            persist=not data.stage_candidate,
         )
         if not ok or fresh is None:
             raise HTTPException(status_code=500, detail="Training failed")
+        provenance = dict(profile_report["acquisition_provenance"])
+        if data.merge_history and clf.is_fitted:
+            previous = getattr(clf, "acquisition_provenance_", {}) or {}
+            provenance["verified"] = bool(provenance["verified"] and previous.get("verified"))
+            provenance["fingerprints"] = sorted(set(provenance.get("fingerprints", [])) | set(getattr(clf, "acquisition_fingerprints_", []) or []))
+            if not provenance["verified"]:
+                provenance["warning"] = "Historical or incoming acquisition provenance is incomplete; physical board compatibility is unverified."
+        fresh.acquisition_provenance_ = provenance
+        fresh.acquisition_fingerprints_ = list(provenance.get("fingerprints", []))
+        if data.stage_candidate:
+            from enose.classifier.registry import create_candidate
+
+            candidate_id = create_candidate(fresh, os.path.join(TRAINED_MODELS_DIR, "candidates"))
+            return {
+                "success": True, "staged": True, "candidate_id": candidate_id,
+                "update_type": "candidate_staged", "samples_received": samples_received,
+                "samples_processed": len(df), "current_accuracy": accuracy,
+                "classes": fresh.classes_.tolist(), "merge_history": data.merge_history,
+                "training_profile": profile, "profile_report": profile_report,
+                "classifier_backend": getattr(fresh, "backend_name", backend),
+                "baseline_mode": getattr(fresh.config, "baseline_mode", baseline_mode),
+                "snv": bool(getattr(fresh.config, "snv", data.snv)),
+                "validation": fresh.get_model_info().get("validation", {}),
+                "calibration": fresh.get_model_info().get("calibration", {}),
+                "message": "Candidate saved separately. Active model and canonical history are unchanged. Promotion requires an explicit decision; this holdout is not a paired comparison.",
+            }
         state.set_classifier(fresh)
         clf = fresh
         update_type = "historical_retrain" if data.merge_history else "replacement_training"
@@ -499,7 +560,8 @@ async def full_training_pipeline(
         if state.vlm_model is None or state.vlm_processor is None:
             raise HTTPException(status_code=503, detail="VLM not loaded")
 
-        detection_result = process_image_with_vlm(
+        from .vision import run_vision_inference
+        detection_result = await run_vision_inference(
             state.vlm_model, state.vlm_processor,
             temp_image, "<OPEN_VOCABULARY_DETECTION>", f"Find {object_name}",
         )

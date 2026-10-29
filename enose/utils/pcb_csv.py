@@ -26,6 +26,7 @@ def normalize_pcb_recording(frame, resistance_unit="ohm", recording_date=None):
     if "timestamp_iso" not in frame.columns:
         raise ValueError("PCB CSV requires timestamp_iso")
     work = frame.copy()
+    work["_source_row"] = range(len(work))
     measurements = []
     valid_indices = []
     for position, row in frame.iterrows():
@@ -69,6 +70,7 @@ def normalize_pcb_recording(frame, resistance_unit="ohm", recording_date=None):
     work["resistance_unit"] = resistance_unit
     report = {
         "parser": "pcb_resistance_csv", "recovered_rows": 0,
+        "source_rows": len(frame),
         "dropped_rows": len(frame) - len(work), "environment_reliable": False,
         "resistance_unit": resistance_unit, "input_resistance_unit": "ohm",
         "timestamp_date_known": not time_only or recording_date is not None,

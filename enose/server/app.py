@@ -15,11 +15,12 @@ from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from enose.config import DATA_DIR, PLOTS_DIR, TRAINED_MODELS_DIR, VLM_MODEL_PATH
+from enose import __version__
 from enose.vision.gpu import check_gpu_availability
 
 from . import state
 from .model_loader import load_or_create_classifier
-from .routes import analytics, health, live, smell, training, ui, vision
+from .routes import analytics, health, live, smell, training, ui, vision, models
 
 # Set ENOSE_NO_VLM=1 to start without loading Florence-2 (classifier-only / offline testing mode).
 _NO_VLM = os.environ.get("ENOSE_NO_VLM", "0").lower() in ("1", "true", "yes")
@@ -60,7 +61,7 @@ async def lifespan(app: FastAPI):
     """FastAPI lifespan: run startup, yield, then cleanup on shutdown."""
     await startup_logic()
     print("=" * 60)
-    print("E-Nose Multimodal Server v3.2.2 ready on http://0.0.0.0:8080")
+    print(f"E-Nose Multimodal Server v{__version__} ready; see Uvicorn for the listening address")
     print("Docs at /docs")
     print("=" * 60)
     yield
@@ -72,7 +73,7 @@ def create_app() -> FastAPI:
     app = FastAPI(
         title="E-Nose Multimodal Server",
         description="Florence-2 vision + 22-feature smell classification",
-        version="3.2.2",
+        version=__version__,
         lifespan=lifespan,
     )
 
@@ -84,6 +85,7 @@ def create_app() -> FastAPI:
     app.include_router(health.router)
     app.include_router(smell.router)
     app.include_router(training.router)
+    app.include_router(models.router)
     app.include_router(analytics.router)
     app.include_router(live.router)
     app.include_router(vision.router)

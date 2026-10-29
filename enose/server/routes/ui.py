@@ -128,6 +128,13 @@ textarea{resize:vertical;font-family:monospace;font-size:.85rem}
 
       <div class="div">or paste 17 resistance values (or all 22 values)</div>
 
+      <label for="classify-unit">Resistance units of the entered values</label>
+      <select id="classify-unit" style="width:auto">
+        <option value="">Not declared (unverified legacy models only)</option>
+        <option value="ohm">Ω (ohm)</option><option value="kohm">kΩ (kohm)</option><option value="mohm">MΩ (mohm)</option>
+      </select>
+      <p id="classify-unit-hint" class="hint">Declare the units; numbers are not silently rescaled. They must match the trained model.</p>
+
       <div style="margin-bottom:.75rem">
         <label for="qp">17 or 22 comma-separated values &mdash; R1, &hellip;, R17 [, T, H, CO2, H2S, CH2O]</label>
         <textarea id="qp" rows="2" placeholder="e.g. 15.2, 8.3, 12.1, 3.4, 18.9, 11.2, 9.8, 6.7, 14.3, 10.5, 13.2, 7.8, 5.6, 12.4, 8.9, 6.3, 11.7, 21.0, 49.0, 400, 0.0, 5.0"></textarea>
@@ -206,6 +213,23 @@ textarea{resize:vertical;font-family:monospace;font-size:.85rem}
       </div>
 
       <p id="train-profile-hint" class="hint">Stable mode uses one-minute medians from late, low-slope analyte plateaus and clean air immediately before each exposure. A Timestamp column is required.</p>
+      <details style="margin-bottom:1rem">
+        <summary>Extraction settings, recording identity and verified annotations</summary>
+        <div class="tgrid" style="margin-top:.75rem">
+          <div><label for="pwindow">Window (seconds)</label><input id="pwindow" type="number" value="60" min="1" max="86400"></div>
+          <div><label for="pstride">Stride (seconds)</label><input id="pstride" type="number" value="60" min="1" max="86400"></div>
+          <div><label for="ptail">Clean-air tail (seconds)</label><input id="ptail" type="number" value="600" min="1" max="86400"></div>
+          <div><label for="pfraction">Retained exposure fraction</label><input id="pfraction" type="number" value="0.25" min="0.001" max="1" step="0.05"></div>
+          <div><label for="pmargin">Exposure end exclusion (seconds)</label><input id="pmargin" type="number" value="30" min="0" max="86400"></div>
+          <div><label for="pslope">Maximum relative slope (1/second)</label><input id="pslope" type="number" value="0.002" min="0" max="1" step="0.0001"></div>
+          <div><label for="recording-date">PCB recording date (if missing)</label><input id="recording-date" type="date"></div>
+          <div><label for="recording-session">Session ID (independent collection session)</label><input id="recording-session" placeholder="e.g. board8-day1"></div>
+          <div><label for="recording-id">Recording ID (optional)</label><input id="recording-id" placeholder="Defaults to CSV content fingerprint"></div>
+        </div>
+        <label for="csv-annotations">Optional verified annotations: start_row,end_row,label</label>
+        <textarea id="csv-annotations" rows="3" placeholder="0,100,air&#10;100,250,acetone"></textarea>
+        <p class="hint">Zero-based data rows, end row excluded; header is not counted. Annotations override labels only in their ranges. No labels are inferred. Unlabelled rows are excluded. Use actual experiment records, not guesses from signal shape.</p>
+      </details>
       <label for="pcb-csv-unit">PCB CSV output resistance units</label>
       <select id="pcb-csv-unit" style="width:auto">
         <option value="ohm" selected>Ω (ohm)</option>
@@ -228,11 +252,29 @@ textarea{resize:vertical;font-family:monospace;font-size:.85rem}
         <span><strong>Merge with historical training data</strong> (Idea 1 default). Uncheck to replace the model and canonical history with only this CSV.</span>
       </label>
 
+      <label style="display:flex;align-items:flex-start;gap:.5rem;font-size:.85rem;cursor:pointer;margin-bottom:.75rem">
+        <input type="checkbox" id="stage-candidate" checked style="width:auto;margin-top:.15rem">
+        <span><strong>Train candidate first</strong> (recommended). Keep the active model and canonical history unchanged until explicit promotion.</span>
+      </label>
+
       <div class="brow">
+        <button class="btn bs" onclick="previewCsv()">Preview CSV / retained windows</button>
         <button class="btn bsuc" onclick="trainCsv()">&#128640; Train model</button>
         <button class="btn bs" onclick="document.getElementById('csvp').value='';document.getElementById('csvf').value=''">Clear</button>
       </div>
       <div id="tr"></div>
+      <div id="csv-preview"></div>
+    </div>
+    <div class="card">
+      <h2>Model candidates and rollback</h2>
+      <p class="hint">Candidate holdout scores do not establish improvement over the active model. Promotion requires an independent paired comparison or your explicit override. After promotion or rollback, capture a new clean-air baseline.</p>
+      <button class="btn bs" onclick="loadCandidates()">Refresh candidates</button>
+      <label style="display:flex;gap:.5rem;margin-top:.75rem"><input type="checkbox" id="allow-unevaluated" style="width:auto"> Explicitly permit promotion without independent paired evaluation</label>
+      <label style="display:flex;gap:.5rem;margin-top:.5rem"><input type="checkbox" id="allow-regression" style="width:auto"> Explicitly permit a measured regression</label>
+      <div id="candidate-list"></div>
+      <div class="tgrid" style="margin-top:1rem"><div><label for="rollback-id">Rollback snapshot ID (returned by promotion)</label><input id="rollback-id" placeholder="32-character snapshot ID"></div></div>
+      <button class="btn bs" onclick="rollbackModel()">Restore rollback snapshot</button>
+      <div id="candidate-result"></div>
     </div>
   </div>
 
@@ -272,6 +314,7 @@ textarea{resize:vertical;font-family:monospace;font-size:.85rem}
         </label>
       </div>
       <div id="lv-action"></div>
+      <button class="btn bs" onclick="downloadLiveDiagnostics()">Download read-only diagnostics</button>
 
       <div class="lvmeta">
         <div class="lvstat"><div class="k">Browser polling</div><div class="v"><span id="lv-dot" class="lvdot off"></span><span id="lv-state">idle</span></div></div>
@@ -282,6 +325,7 @@ textarea{resize:vertical;font-family:monospace;font-size:.85rem}
         <div class="lvstat"><div class="k">Last conf.</div><div class="v" id="lv-conf">&mdash;</div></div>
       </div>
       <p id="lv-device" class="hint">Acquisition metadata not available.</p>
+      <p id="lv-heater" class="hint">Heater status unavailable. Missing telemetry does not establish that heating is off.</p>
       <p id="lv-env-source" class="hint"></p>
       <p id="lv-prediction-error" class="hint" style="color:var(--err)"></p>
 
@@ -314,6 +358,22 @@ textarea{resize:vertical;font-family:monospace;font-size:.85rem}
       <h2>Model information</h2>
       <button class="btn bs" style="font-size:.8rem;padding:.3rem .7rem;margin-bottom:1rem" onclick="loadInfo()">&#8635; Refresh</button>
       <div id="sdet"><span style="color:var(--muted)">Click Refresh to load.</span></div>
+    </div>
+    <div class="card">
+      <h2>Compare active model and candidate on the same independent CSV</h2>
+      <p class="hint">Upload verified labelled observations/windows from exposures absent from BOTH training histories. Rows are evaluated as supplied, without plateau extraction or retraining. Use stable observations if that is the intended test. Exact-row overlap checks cannot establish independence of neighbouring measurements.</p>
+      <div class="tgrid">
+        <div><label for="eval-candidate">Candidate ID</label><input id="eval-candidate" placeholder="32-character candidate ID"></div>
+        <div><label for="eval-target">Verified label column</label><input id="eval-target" value="smell_label"></div>
+        <div><label for="eval-unit">Resistance units</label><select id="eval-unit"><option value="ohm">Ω (ohm)</option><option value="kohm">kΩ (kohm)</option><option value="mohm">MΩ (mohm)</option></select></div>
+      </div>
+      <label for="eval-file">Independent labelled CSV file</label>
+      <input id="eval-file" type="file" accept=".csv,.txt" onchange="loadEvaluationFile(this)">
+      <label for="eval-csv">Or paste independent CSV</label><textarea id="eval-csv" rows="4"></textarea>
+      <p class="hint">Units must match both models. For PCB rs_ch*_ohm exports, the selected unit specifies output conversion; canonical R1–R17 columns are not silently rescaled.</p>
+      <label style="display:flex;align-items:flex-start;gap:.5rem;margin:.75rem 0"><input id="eval-independent" type="checkbox" style="width:auto;margin-top:.15rem"><span>I verified that these exposures/sessions are absent from BOTH the active model's and candidate's training histories. This is not training data or neighbouring samples from the same exposures.</span></label>
+      <button class="btn bs" onclick="evaluateCandidate()">Evaluate both on the same set</button>
+      <div id="eval-result"></div>
     </div>
   </div>
 
@@ -365,6 +425,7 @@ function showTab(t){
     document.querySelectorAll('.tb')[i].classList.toggle('on',x===t);
   });
   if(t==='status')loadInfo();
+  if(t==='train')loadCandidates();
   if(t==='live')lvOnShow();
 }
 
@@ -401,7 +462,13 @@ async function classify(){
   if(v.length!==17&&v.length!==22){msg('cr','err','Need exactly 17 or 22 values.');return;}
   document.getElementById('cr').innerHTML='<div class="msg info"><span class="spin"></span> Classifying&hellip;</div>';
   try{
-    const r=await fetch('/smell/test_console',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({values:v.join(',')})});
+    const unit=document.getElementById('classify-unit').value||null;
+    const infoResponse=await fetch('/smell/model_info',{cache:'no-store'});
+    if(!infoResponse.ok)throw new Error('Cannot verify model units; refresh Model Info and retry.');
+    const info=await infoResponse.json();
+    const modelUnit=['ohm','kohm','mohm'].includes(info.resistance_unit)?info.resistance_unit:null;
+    if(modelUnit&&unit!==modelUnit){msg('cr','err','Declare the entered resistance units. This model requires '+modelUnit+'; convert your values if necessary.');return;}
+    const r=await fetch('/smell/test_console',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({values:v.join(','),resistance_unit:unit})});
     const d=await r.json();
     if(!r.ok){msg('cr','err',d.detail||JSON.stringify(d));return;}
     renderResult(d);addHist(d.predicted_smell,d.confidence);
@@ -480,9 +547,11 @@ function syncTrainingOptions(){
   }
 }
 
-async function trainCsv(){
+function esc(value){return String(value??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}
+
+function csvTrainingPayload(){
   const csv=document.getElementById('csvp').value.trim();
-  if(!csv){msg('tr','err','No CSV data provided.');return;}
+  if(!csv)throw new Error('No CSV data provided.');
   const tc=document.getElementById('tcol').value.trim()||'Gas name';
   const ua=document.getElementById('uaug').checked;
   const parsedAug=parseInt(document.getElementById('naug').value);
@@ -494,15 +563,85 @@ async function trainCsv(){
   const baselineMode=document.getElementById('tbmode').value;
   const snv=document.getElementById('tsnv').checked;
   const resistanceUnit=document.getElementById('pcb-csv-unit').value;
-  if(!mh&&!confirm('Replace the current model and training history with ONLY this CSV?'))return;
+  const annotations=document.getElementById('csv-annotations').value.split(/\r?\n/).filter(line=>line.trim()).map((line,i)=>{
+    const parts=line.split(',');
+    if(parts.length!==3)throw new Error('Annotation line '+(i+1)+': expected start_row,end_row,label.');
+    const start=Number(parts[0]),end=Number(parts[1]),label=parts[2].trim();
+    if(!parts[0].trim()||!parts[1].trim()||!Number.isInteger(start)||!Number.isInteger(end)||start<0||end<=start||!label)throw new Error('Invalid annotation line '+(i+1));
+    return {start_row:start,end_row:end,label:label};
+  });
+  const number=id=>{const value=Number(document.getElementById(id).value);if(!Number.isFinite(value))throw new Error('Invalid '+id);return value;};
+  return {csv_data:csv,target_column:tc,use_augmentation:ua,n_augmentations:na,lowercase_labels:lc,noise_std:0.0015,merge_history:mh,training_profile:profile,classifier_backend:backend,baseline_mode:baselineMode,snv:snv,resistance_unit:resistanceUnit,
+    stage_candidate:document.getElementById('stage-candidate').checked,
+    plateau_options:{window_seconds:number('pwindow'),stride_seconds:number('pstride'),baseline_tail_seconds:number('ptail'),plateau_fraction:number('pfraction'),tail_margin_seconds:number('pmargin'),max_relative_slope:number('pslope')},
+    recording_date:document.getElementById('recording-date').value||null,session_id:document.getElementById('recording-session').value.trim()||null,recording_id:document.getElementById('recording-id').value.trim()||null,annotations:annotations};
+}
+
+async function previewCsv(){
+  let payload;
+  try{payload=csvTrainingPayload();}catch(e){msg('tr','err',esc(e.message));return;}
+  msg('tr','info','<span class="spin"></span> Preparing read-only preview; no model or history will change.');
+  try{
+    const response=await fetch('/smell/preview_csv',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});
+    const data=await response.json();
+    if(!response.ok){msg('tr','err',esc(typeof data.detail==='string'?data.detail:JSON.stringify(data.detail)));return;}
+    const report=data.profile_report||{},warnings=(report.input_quality||{}).warnings||[];
+    msg('tr',data.training_ready?'ok':'err',esc(data.message)+'<br>Selected: '+data.selected_rows+'; classes: '+esc(JSON.stringify(data.class_counts))+(warnings.length?'<br>'+warnings.map(esc).join('<br>'):''));
+    const exposures=report.exposure_details||[];
+    const rows=exposures.map(exposure=>{
+      const windows=exposure.windows||[];
+      const rejected=windows.filter(window=>!window.kept);
+      const reasons=[...(exposure.rejection_reasons||[]),...new Set(rejected.map(window=>window.reason))];
+      return '<tr><td>'+esc(exposure.label)+'</td><td>'+esc(exposure.start)+'<br>'+esc(exposure.end)+'</td><td>'+Number(exposure.baseline_kept||0)+' / '+Number(exposure.plateau_kept||0)+'</td><td>'+esc(reasons.join('; ')||'none')+'</td></tr>';
+    }).join('');
+    const legend=report.profile==='raw'?'Raw-row mode keeps every verified labelled row; no plateau windows are extracted.':'Green shading: retained windows; red shading: rejected windows. Unshaded regions are outside the selected extraction phases.';
+    document.getElementById('csv-preview').innerHTML='<p class="hint">Original resistance traces (each normalized for display only). '+legend+' Plot is bounded to 1,200 source points and 2,000 window overlays.</p><svg id="csv-preview-svg" viewBox="0 0 900 240" style="width:100%;background:#f8fafc"></svg><table class="htable"><thead><tr><th>Exposure</th><th>Time interval</th><th>Kept air / analyte</th><th>Rejection reasons</th></tr></thead><tbody>'+rows+'</tbody></table>';
+    drawCsvPreview(data.plot||{},exposures);
+  }catch(e){msg('tr','err','Preview failed: '+esc(e.message));}
+}
+
+function drawCsvPreview(plot,exposures){
+  const svg=document.getElementById('csv-preview-svg'),points=plot.points||[];
+  if(!svg||!points.length)return;
+  const dates=points.map(point=>Date.parse(point.timestamp));
+  const dated=dates.every(Number.isFinite),coordinates=dated?dates:points.map(point=>point.row);
+  const low=Math.min(...coordinates),range=Math.max(1,Math.max(...coordinates)-low);
+  const x=value=>35+830*(value-low)/range;
+  let output='';
+  if(dated)for(const exposure of exposures)for(const window of exposure.windows||[]){
+    const start=Date.parse(window.start),end=Date.parse(window.end);
+    if(Number.isFinite(start)&&Number.isFinite(end))output+='<rect x="'+x(start)+'" y="15" width="'+Math.max(1,x(end)-x(start))+'" height="195" fill="'+(window.kept?'#22c55e':'#ef4444')+'" opacity="0.12"/>';
+  }
+  (plot.sensors||RES).forEach((sensor,index)=>{
+    const values=points.map(point=>point[sensor]).filter(Number.isFinite);
+    if(!values.length)return;
+    const minimum=Math.min(...values),span=Math.max(1e-12,Math.max(...values)-minimum);
+    let path='',previousValid=false;
+    points.forEach((point,i)=>{const value=point[sensor];if(!Number.isFinite(value)){previousValid=false;return;}path+=(previousValid?'L':'M')+x(coordinates[i]).toFixed(2)+','+(210-180*(value-minimum)/span).toFixed(2);previousValid=true;});
+    output+='<path d="'+path+'" fill="none" stroke="'+R_PALETTE[index%R_PALETTE.length]+'" stroke-width="1" opacity="0.7"/>';
+  });
+  output+='<text x="35" y="233" font-size="11">'+esc(dated?points[0].timestamp:'Source row '+points[0].row)+'</text><text x="865" y="233" text-anchor="end" font-size="11">'+esc(dated?points[points.length-1].timestamp:'Source row '+points[points.length-1].row)+'</text>';
+  svg.innerHTML=output;
+}
+
+async function trainCsv(){
+  let payload;
+  try{payload=csvTrainingPayload();}catch(e){msg('tr','err',esc(e.message));return;}
+  if(!payload.stage_candidate&&!payload.merge_history&&!confirm('Replace the current model and training history with ONLY this CSV?'))return;
+  if(!payload.stage_candidate&&payload.merge_history&&!confirm('Retrain and immediately replace the active model using merged history? Candidate staging is disabled.'))return;
   msg('tr','info','<span class="spin"></span> Training&hellip; this may take a minute.');
   try{
     const r=await fetch('/smell/learn_from_csv',{method:'POST',headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({csv_data:csv,target_column:tc,use_augmentation:ua,n_augmentations:na,lowercase_labels:lc,noise_std:0.0015,merge_history:mh,training_profile:profile,classifier_backend:backend,baseline_mode:baselineMode,snv:snv,resistance_unit:resistanceUnit})});
+      body:JSON.stringify(payload)});
     const d=await r.json();
-    if(!r.ok){msg('tr','err',d.detail||JSON.stringify(d));return;}
+    if(!r.ok){msg('tr','err',esc(typeof d.detail==='string'?d.detail:JSON.stringify(d.detail||d)));return;}
+    if(d.staged){
+      const metric=d.current_accuracy==null?'Generalization not estimable':(d.current_accuracy*100).toFixed(2)+'% holdout balanced accuracy';
+      msg('tr','ok','Candidate '+esc(d.candidate_id)+' saved separately.<br>'+esc(d.message)+'<br>'+esc(metric)+'<br>'+esc((d.validation||{}).warning||'Independent paired comparison is still required before claiming improvement.'));
+      loadCandidates();return;
+    }
     const cls=(d.classes||[]).join(', ')||'(none)';
-    const acc=d.current_accuracy!=null?(d.current_accuracy*100).toFixed(2)+'%':'&mdash;';
+    const acc=d.current_accuracy!=null?(d.current_accuracy*100).toFixed(2)+'%':'Generalization not estimable';
     const warnings=((d.profile_report||{}).input_quality||{}).warnings||[];
     const quality=warnings.length?`<br><strong>Data warnings:</strong> ${warnings.join('; ')}`:'';
     const received=d.samples_received||d.samples_processed;
@@ -512,6 +651,77 @@ async function trainCsv(){
     // "Try" buttons (which mirror the current known classes).
     refreshStatus();loadInfo();loadClassExamples();
   }catch(e){msg('tr','err','Request failed: '+e.message);}
+}
+
+async function loadCandidates(){
+  const element=document.getElementById('candidate-list');
+  element.textContent='Loading candidates…';
+  try{
+    const response=await fetch('/smell/models/candidates',{cache:'no-store'}),data=await response.json();
+    if(!response.ok)throw new Error(typeof data.detail==='string'?data.detail:JSON.stringify(data));
+    const candidates=data.candidates||[];
+    element.innerHTML=candidates.length?'<table class="htable"><thead><tr><th>ID / classes</th><th>Validation</th><th>Action</th></tr></thead><tbody>'+candidates.map(candidate=>{
+      const validation=candidate.validation||{};
+      const id=String(candidate.id||'');
+      const button=/^[0-9a-f]{32}$/.test(id)?'<button class="btn bs" onclick="promoteModel(\''+id+'\')">Promote explicitly</button>':'';
+      const estimable=validation.estimable===true?'Independent-group generalization estimate available':'Generalization not estimable';
+      const calibration=(candidate.calibration||{}).strategy||'legacy_or_unknown';
+      return '<tr><td>'+esc(id)+'<br>'+esc((candidate.classes||[]).join(', '))+'</td><td>'+esc(validation.strategy||'unknown')+'<br>'+esc(estimable)+'<br>'+esc(validation.warning||candidate.note||'')+'<br>Calibration strategy: '+esc(calibration)+'</td><td>'+button+'</td></tr>';
+    }).join('')+'</tbody></table>':'<p class="hint">No staged candidates.</p>';
+    if(!document.getElementById('rollback-id').value){try{document.getElementById('rollback-id').value=localStorage.getItem('enose-rollback:'+window.location.origin)||'';}catch(e){}}
+  }catch(e){element.textContent='Could not load candidates: '+e.message;}
+}
+
+function loadEvaluationFile(input){
+  const file=input.files[0];if(!file)return;
+  const reader=new FileReader();reader.onload=event=>{document.getElementById('eval-csv').value=event.target.result;document.getElementById('eval-independent').checked=false;document.getElementById('eval-result').textContent='';};reader.readAsText(file);
+}
+
+async function evaluateCandidate(){
+  const identifier=document.getElementById('eval-candidate').value.trim(),csv=document.getElementById('eval-csv').value.trim();
+  if(!/^[0-9a-f]{32}$/.test(identifier)){msg('eval-result','err','Provide a valid 32-character candidate ID.');return;}
+  if(!csv){msg('eval-result','err','Upload or paste the independent labelled CSV.');return;}
+  if(!document.getElementById('eval-independent').checked){msg('eval-result','err','Explicitly confirm that these exposures are absent from BOTH training histories.');return;}
+  const payload={candidate_id:identifier,csv_data:csv,target_column:document.getElementById('eval-target').value.trim()||'smell_label',resistance_unit:document.getElementById('eval-unit').value,independent_confirmed:true};
+  msg('eval-result','info','<span class="spin"></span> Evaluating both models on exactly the same supplied rows. No model is being trained or promoted.');
+  try{
+    const response=await fetch('/smell/models/evaluate',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)}),data=await response.json();
+    if(!response.ok){msg('eval-result','err',esc(typeof data.detail==='string'?data.detail:JSON.stringify(data.detail||data)));return;}
+    const comparison=data.comparison||{},active=comparison.active||{},candidate=comparison.candidate||{};
+    const percentage=value=>typeof value==='number'&&Number.isFinite(value)?(100*value).toFixed(2)+'%':'Generalization not estimable';
+    const rows=[['Active',active],['Candidate',candidate]].map(([name,metrics])=>'<tr><td>'+name+'</td><td>'+percentage(metrics.accuracy)+'</td><td>'+percentage(metrics.balanced_accuracy)+'</td></tr>').join('');
+    document.getElementById('eval-result').innerHTML='<div class="msg info">SAME-set comparison: '+Number(comparison.rows||0)+' supplied rows. This does not establish performance outside this evaluation set.</div><table class="htable"><thead><tr><th>Model</th><th>Accuracy</th><th>Balanced accuracy</th></tr></thead><tbody>'+rows+'</tbody></table><p class="hint">'+esc(comparison.limitation||'Independence is operator-confirmed, not proven by the application.')+'</p>';
+    loadCandidates();
+  }catch(error){msg('eval-result','err','Evaluation failed: '+esc(error.message));}
+}
+
+async function promoteModel(identifier){
+  const unevaluated=document.getElementById('allow-unevaluated').checked,regression=document.getElementById('allow-regression').checked;
+  let question='Replace the active model and canonical history with candidate '+identifier+'? A rollback snapshot will be created. A new clean-air baseline will be required.';
+  if(unevaluated)question+=' You explicitly accept that improvement has NOT been established by an independent paired evaluation.';
+  if(regression)question+=' You explicitly permit a measured regression.';
+  if(!confirm(question))return;
+  try{
+    const response=await fetch('/smell/models/promote',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({candidate_id:identifier,allow_unevaluated:unevaluated,allow_regression:regression})}),data=await response.json();
+    if(!response.ok){msg('candidate-result','err',esc(typeof data.detail==='string'?data.detail:JSON.stringify(data.detail)));return;}
+    document.getElementById('rollback-id').value=data.rollback_id;
+    try{localStorage.setItem('enose-rollback:'+window.location.origin,data.rollback_id);}catch(e){}
+    msg('candidate-result','ok','Candidate promoted. Capture a new clean-air baseline. Rollback snapshot: '+esc(data.rollback_id));
+    document.getElementById('allow-unevaluated').checked=false;document.getElementById('allow-regression').checked=false;
+    refreshStatus();loadInfo();loadClassExamples();loadCandidates();
+  }catch(e){msg('candidate-result','err','Promotion failed: '+esc(e.message));}
+}
+
+async function rollbackModel(){
+  const identifier=document.getElementById('rollback-id').value.trim();
+  if(!/^[0-9a-f]{32}$/.test(identifier)){msg('candidate-result','err','Provide the 32-character rollback snapshot ID returned by promotion.');return;}
+  if(!confirm('Restore the model and training history from snapshot '+identifier+'? Capture a new clean-air baseline afterwards.'))return;
+  try{
+    const response=await fetch('/smell/models/rollback',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({snapshot_id:identifier})}),data=await response.json();
+    if(!response.ok){msg('candidate-result','err',esc(typeof data.detail==='string'?data.detail:JSON.stringify(data.detail)));return;}
+    msg('candidate-result','ok','Rollback completed. Capture a new clean-air baseline.');
+    refreshStatus();loadInfo();loadClassExamples();
+  }catch(e){msg('candidate-result','err','Rollback failed: '+esc(e.message));}
 }
 
 async function refreshStatus(){
@@ -543,6 +753,9 @@ async function refreshStatus(){
   try{
     const r=await fetch('/smell/model_info',{cache:'no-store'});const d=await r.json();
     const cls=d.classes||[];
+    document.getElementById('classify-unit-hint').textContent=['ohm','kohm','mohm'].includes(d.resistance_unit)
+      ?'Active model requires '+d.resistance_unit+'. Declare the actual units of your entered values; they are not silently rescaled.'
+      :'Active model units are unverified. Declare known units and verify acquisition compatibility before trusting predictions.';
     const sb=document.getElementById('cls-b');
     sb.className='badge '+(cls.length?'g':'gr');
     sb.textContent='Known smells: '+(cls.length||'none');
@@ -577,15 +790,18 @@ async function loadInfo(){
       <div class="lvstat"><div class="k">Resistance unit</div><div class="v">${['ohm','kohm','mohm'].includes(d.resistance_unit)?d.resistance_unit:'unverified'}</div></div>
       <div class="lvstat"><div class="k">Training samples</div><div class="v">${total}</div></div>
       <div class="lvstat"><div class="k">Training runs</div><div class="v">${h.accuracy?.length||0}</div></div>
-      <div class="lvstat"><div class="k">Last accuracy</div><div class="v">${acc!=null?(acc*100).toFixed(1)+'%':'—'}</div></div>
-      <div class="lvstat"><div class="k">Balanced acc.</div><div class="v">${bal!=null?(bal*100).toFixed(1)+'%':'—'}</div></div>
+      <div class="lvstat"><div class="k">Last accuracy</div><div class="v" style="font-size:.9rem">${acc!=null?(acc*100).toFixed(1)+'%':'Generalization not estimable'}</div></div>
+      <div class="lvstat"><div class="k">Balanced acc.</div><div class="v" style="font-size:.9rem">${bal!=null?(bal*100).toFixed(1)+'%':'Generalization not estimable'}</div></div>
       <div class="lvstat"><div class="k">Calibration</div><div class="v" style="font-size:.9rem">${calib.enabled?(calib.method||'on'):'off'}</div></div>
+      <div class="lvstat"><div class="k">Calibration strategy</div><div class="v" style="font-size:.8rem">${esc(calib.strategy||'legacy_or_unknown')}</div></div>
+      <div class="lvstat"><div class="k">Validation strategy</div><div class="v" style="font-size:.8rem">${esc(validation.strategy||'unknown')}</div></div>
+      <div class="lvstat"><div class="k">Generalization estimable</div><div class="v" style="font-size:.9rem">${validation.estimable===true?'yes':'no'}</div></div>
       <div class="lvstat"><div class="k">Backend</div><div class="v" style="font-size:.9rem">${d.classifier_backend||'balanced_rf'}</div></div>
       <div class="lvstat"><div class="k">Baseline mode</div><div class="v" style="font-size:.9rem">${drift.baseline_mode||'none'}</div></div>
       <div class="lvstat"><div class="k">Live baseline</div><div class="v" style="font-size:.9rem">${drift.baseline_captured?'captured':'missing'}</div></div>
     </div>`;
-    const validationHtml=validation.warning
-      ?`<div class="msg info"><strong>Validation limitation:</strong> ${validation.warning}</div>`:'';
+    const validationHtml=validation.warning||validation.estimable!==true
+      ?`<div class="msg info"><strong>Validation limitation:</strong> ${esc(validation.warning||'Generalization not estimable from independent groups; collect additional independent exposures.')}</div>`:'';
 
     // Class distribution — how many training samples back each class. Uneven
     // bars flag under-represented smells that the model will predict weakly.
@@ -615,13 +831,13 @@ async function loadInfo(){
     if(pcmKeys.length){
       const rows=pcmKeys.sort().map(k=>{
         const m=pcm[k]||{};
-        const p=(m.precision!=null)?(m.precision*100).toFixed(1)+'%':'—';
-        const rc=(m.recall!=null)?(m.recall*100).toFixed(1)+'%':'—';
-        const f=(m.f1!=null)?(m.f1*100).toFixed(1)+'%':'—';
+        const p=(m.precision!=null)?(m.precision*100).toFixed(1)+'%':'Generalization not estimable';
+        const rc=(m.recall!=null)?(m.recall*100).toFixed(1)+'%':'Generalization not estimable';
+        const f=(m.f1!=null)?(m.f1*100).toFixed(1)+'%':'Generalization not estimable';
         const sup=m.support||0;
         // Colour-code F1 so weak classes jump out at a glance.
         const fv=+m.f1||0;
-        const col=fv>=0.85?'#16a34a':(fv>=0.7?'#ca8a04':'#dc2626');
+        const col=m.f1==null?'#64748b':fv>=0.85?'#16a34a':(fv>=0.7?'#ca8a04':'#dc2626');
         return `<tr><td><strong>${k}</strong></td><td>${p}</td><td>${rc}</td>
           <td style="color:${col};font-weight:600">${f}</td><td>${sup}</td></tr>`;
       }).join('');
@@ -632,7 +848,7 @@ async function loadInfo(){
           <tbody>${rows}</tbody>
         </table>`;
     }else{
-      pcmHtml=`<div class="msg info" style="margin-top:1rem">Per-class metrics not yet available &mdash; <strong>retrain</strong> the model to populate this table.</div>`;
+      pcmHtml=`<div class="msg info" style="margin-top:1rem">${validation.estimable===true?'Per-class metrics are unavailable in this artifact.':'Generalization not estimable; collect additional independent exposures. Retraining the same correlated rows does not create independent validation.'}</div>`;
     }
 
     // Confusion matrix — small enough to render as an HTML table.
@@ -716,12 +932,13 @@ async function lvPollOnce(){
       LV.lastId=d.last_id??LV.lastId;
     }
     document.getElementById('lv-n').textContent=(d.buffered||0)+' / '+(d.capacity||'?');
+    document.getElementById('lv-msg').innerHTML='';
     LV.err=0;
     lvRedraw();
   }catch(e){
     LV.err++;
     if(LV.err>=3)document.getElementById('lv-msg').innerHTML=
-      `<div class="msg err">Polling failed (${e.message}). Is the server reachable?</div>`;
+      `<div class="msg err">SERVER ERROR: polling failed (${esc(e.message)}). Check the server address, connection and server log. This is not a sensor classification.</div>`;
   }
 }
 async function lvClear(){
@@ -731,6 +948,21 @@ async function lvClear(){
       document.getElementById('lv-msg').innerHTML='<div class="msg ok">Buffer cleared.</div>';
       setTimeout(()=>{document.getElementById('lv-msg').innerHTML='';},2000);}
   }catch(e){}
+}
+
+async function downloadLiveDiagnostics(){
+  msg('lv-action','info','Collecting read-only server, model and acquisition diagnostics. No USB or heater commands will be sent.');
+  const endpoints={live:'/sensor/live/stats',health:'/health',server:'/',model:'/smell/model_info'};
+  const report={captured_at:new Date().toISOString(),server_origin:window.location.origin,read_only:true};
+  await Promise.all(Object.entries(endpoints).map(async([name,path])=>{
+    try{const response=await fetch(path,{cache:'no-store'});report[name]={http_status:response.status,data:await response.json()};}
+    catch(error){report[name]={error:error.message};}
+  }));
+  try{
+    const blob=new Blob([JSON.stringify(report,null,2)],{type:'application/json'}),url=URL.createObjectURL(blob),anchor=document.createElement('a');
+    anchor.href=url;anchor.download='enose-diagnostics-'+report.captured_at.replace(/[:.]/g,'-')+'.json';document.body.appendChild(anchor);anchor.click();anchor.remove();setTimeout(()=>URL.revokeObjectURL(url),1000);
+    msg('lv-action','ok','Diagnostics downloaded. They contain declared acquisition metadata, not proof of physical calibration or guaranteed heater shutdown.');
+  }catch(error){msg('lv-action','err','Could not download diagnostics: '+esc(error.message));}
 }
 
 async function lvBaseline(){
@@ -804,21 +1036,34 @@ function lvRedraw(){
     document.getElementById('lv-device').textContent=[
       'Backend: '+value(a.backend), 'Board: '+value(a.device_id), 'Firmware: '+value(a.firmware_version),
       'Frame: '+value(a.frame_index), 'Dropped frames: '+value(a.dropped_frames),
-      'Sensor temperatures (not ambient): '+value(a.temp0_c)+' / '+value(a.temp1_c)+' °C',
+      'Sensor temperatures (not ambient): '+value(a.temp0_c)+' / '+value(a.temp1_c)+' °C; CSV active temperature: '+value(a.temp_actual_c)+' °C',
       'Heater duty: '+value(a.duty_permille)+' ‰', 'Status/fault flags: '+value(a.flags)
     ].join(' | ');
+    const heater=a.heater;
+    document.getElementById('lv-heater').textContent=heater&&typeof heater==='object'
+      ?['Heater (last reported): '+value(heater.state),'Off verified: '+value(heater.off_verified),
+        'Reason: '+value(heater.reason),'Target / maximum: '+value(heater.target_c)+' / '+value(heater.maximum_c)+' °C',
+        'Host-loss watchdog: '+value(heater.host_loss_watchdog),
+        heater.host_loss_watchdog===false?'No firmware host-loss shutdown guarantee. A killed process, USB disconnect or host crash cannot guarantee heater off.':'',
+        age>staleAfter?'STALE heater telemetry; do not assume the last state is current.':''].filter(Boolean).join(' | ')
+      :'Heater status unavailable (legacy backend or no diagnostics). Missing telemetry does not establish that heating is off.';
     document.getElementById('lv-env-source').textContent=a.environment_source==='defaults'
       ?'Environmental sensors: UNMEASURED. Compatibility defaults are excluded from the chart.'
       :'Environmental source: '+value(a.environment_source);
     document.getElementById('lv-prediction-error').textContent=last.prediction_error||'';
+    if(a.valid===false)document.getElementById('lv-prediction-error').textContent='INVALID MEASUREMENT: '+(a.reason||last.prediction_error||'Inspect the acquisition diagnostics and sensor status; prediction is blocked.');
+    else if(age>staleAfter)document.getElementById('lv-prediction-error').textContent='STALE STREAM: no fresh reading within '+staleAfter+' seconds. Check the client, USB connection and board stream; do not interpret the last prediction as current.';
+    else if(last.predicted==='unknown')document.getElementById('lv-prediction-error').textContent='UNKNOWN: decision thresholds were not met. Check model compatibility and clean-air baseline; collect a stable exposure.';
+    else if(!last.predicted&&!last.prediction_error)document.getElementById('lv-prediction-error').textContent='WAITING FOR PREDICTION: readings are arriving. Enable client classification or use Fast / Stable prediction after training a compatible model.';
     document.getElementById('lv-last').textContent=last.predicted||last.label||'\u2014';
     document.getElementById('lv-conf').textContent=
       (last.confidence!=null?(last.confidence*100).toFixed(1)+'%':'\u2014');
   }else{
-    document.getElementById('lv-fresh').textContent='no samples';
+    document.getElementById('lv-fresh').textContent='WAITING FOR CLIENT';
     document.getElementById('lv-device').textContent='Acquisition metadata not available.';
+    document.getElementById('lv-heater').textContent='Heater status unavailable. Missing telemetry does not establish that heating is off.';
     document.getElementById('lv-env-source').textContent='';
-    document.getElementById('lv-prediction-error').textContent='';
+    document.getElementById('lv-prediction-error').textContent='No measurements received. Start the acquisition client with --live and the correct --server address. Browser polling alone does not start acquisition.';
     document.getElementById('lv-unit').textContent='';
     document.getElementById('lv-last').textContent='\u2014';
     document.getElementById('lv-conf').textContent='\u2014';

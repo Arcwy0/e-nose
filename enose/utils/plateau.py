@@ -43,6 +43,19 @@ class PlateauConfig:
     max_gap_seconds: float = 300.0
     air_label: str = "air"
 
+    def __post_init__(self):
+        for name in ("window_seconds", "stride_seconds", "baseline_tail_seconds", "max_gap_seconds"):
+            if not np.isfinite(getattr(self, name)) or getattr(self, name) <= 0:
+                raise ValueError(f"{name} must be finite and positive")
+        if not 0 < self.plateau_fraction <= 1 or not 0 <= self.stability_quantile <= 1:
+            raise ValueError("plateau_fraction must be in (0, 1]; stability_quantile in [0, 1]")
+        if not np.isfinite(self.tail_margin_seconds) or self.tail_margin_seconds < 0:
+            raise ValueError("tail_margin_seconds must be finite and nonnegative")
+        if not np.isfinite(self.max_relative_slope) or self.max_relative_slope < 0:
+            raise ValueError("max_relative_slope must be finite and nonnegative")
+        if self.min_window_samples < 2 or self.max_windows_per_phase < 1:
+            raise ValueError("window sample count must be >= 2 and phase cap >= 1")
+
 
 def _canonical_labels(df: pd.DataFrame, label_col: str) -> Tuple[pd.Series, Dict[str, str]]:
     """Normalize spelling and merge names that share an explicit numeric class id."""
@@ -68,6 +81,8 @@ def _window_slices(
     start: pd.Timestamp,
     end: pd.Timestamp,
     cfg: PlateauConfig,
+    diagnostics: Optional[List[Dict[str, Any]]] = None,
+    phase: str = "",
 ) -> List[pd.DataFrame]:
     windows: List[pd.DataFrame] = []
     cursor = start
@@ -77,6 +92,9 @@ def _window_slices(
         win = frame[(frame["_timestamp"] >= cursor) & (frame["_timestamp"] < cursor + width)]
         if len(win) >= cfg.min_window_samples:
             windows.append(win)
+        elif diagnostics is not None:
+            diagnostics.append({"phase": phase, "start": str(cursor), "end": str(cursor + width),
+                                "kept": False, "reason": "too few valid samples", "score": None})
         cursor += stride
     return windows
 
@@ -148,6 +166,7 @@ def build_plateau_training_frame(
     label_col: str = "Gas name",
     timestamp_col: str = "Timestamp",
     config: Optional[PlateauConfig] = None,
+    allow_empty: bool = False,
 ) -> Tuple[pd.DataFrame, Dict[str, Any]]:
     """Return ``(stable_windows, audit_report)`` for a continuous recording."""
     cfg = config or PlateauConfig()
@@ -174,6 +193,9 @@ def build_plateau_training_frame(
     work["_label"], aliases = _canonical_labels(work, label_col)
     gap_seconds = work["_timestamp"].diff().dt.total_seconds()
     new_segment = work["_label"].ne(work["_label"].shift()) | gap_seconds.gt(cfg.max_gap_seconds)
+    for name in ("session_id", "recording_id", "_label_block"):
+        if name in work:
+            new_segment |= work[name].ne(work[name].shift())
     work["_segment"] = new_segment.cumsum().astype(int)
     segments = [g.reset_index(drop=True) for _, g in work.groupby("_segment", sort=False)]
 
@@ -182,10 +204,24 @@ def build_plateau_training_frame(
     air_label = cfg.air_label.strip().lower()
     for index, smell in enumerate(segments):
         label = str(smell["_label"].iloc[0])
-        if label == air_label or index == 0:
+        if label == air_label:
             continue
-        preceding = segments[index - 1]
-        if str(preceding["_label"].iloc[0]) != air_label:
+        preceding = segments[index - 1] if index else None
+        paired = preceding is not None and str(preceding["_label"].iloc[0]) == air_label
+        if paired:
+            for name in ("session_id", "recording_id", "_label_block"):
+                if name in smell and smell[name].iloc[0] != preceding[name].iloc[0]:
+                    paired = False
+            if (smell["_timestamp"].iloc[0] - preceding["_timestamp"].iloc[-1]).total_seconds() > cfg.max_gap_seconds:
+                paired = False
+        if not paired:
+            exposures.append({
+                "label": label, "start": str(smell["_timestamp"].iloc[0]),
+                "end": str(smell["_timestamp"].iloc[-1]), "windows": [],
+                "rejection_reasons": ["no preceding clean-air segment in this recording/session"],
+                "baseline_candidates": 0, "baseline_kept": 0,
+                "plateau_candidates": 0, "plateau_kept": 0,
+            })
             continue
 
         smell_start, smell_end = smell["_timestamp"].iloc[[0, -1]]
@@ -197,29 +233,40 @@ def build_plateau_training_frame(
             preceding["_timestamp"].iloc[-1] - pd.Timedelta(seconds=cfg.baseline_tail_seconds),
         )
         baseline_end = preceding["_timestamp"].iloc[-1]
-        session_id = str(smell_start.date())
+        session_id = str(smell["session_id"].iloc[0]) if "session_id" in smell else str(smell_start.date())
         segment_id = int(smell["_segment"].iloc[0])
-        exposure_id = f"{session_id}:{segment_id}:{label}"
+        recording_id = str(smell["recording_id"].iloc[0]) if "recording_id" in smell else ""
+        recording_prefix = f"{recording_id}:" if recording_id else ""
+        exposure_id = f"{session_id}:{recording_prefix}{segment_id}:{label}"
 
         counts = {"baseline_candidates": 0, "baseline_kept": 0, "plateau_candidates": 0, "plateau_kept": 0}
+        diagnostics = []
+        reasons = []
         for phase, source, start, end, out_label in (
             ("baseline_air", preceding, baseline_start, baseline_end, air_label),
             ("exposure_plateau", smell, plateau_start, plateau_end, label),
         ):
-            windows = _window_slices(source, start, end, cfg)
+            windows = _window_slices(source, start, end, cfg, diagnostics, phase)
             key = "baseline" if phase == "baseline_air" else "plateau"
             counts[f"{key}_candidates"] = len(windows)
+            if not windows:
+                reasons.append(f"{phase}: selected interval is too short or contains too few samples")
             stable_windows: List[Tuple[pd.DataFrame, float]] = []
             for window in windows:
                 score = relative_slope_score(window, cfg.stability_quantile)
                 if score > cfg.max_relative_slope:
+                    diagnostics.append({"phase": phase, "start": str(window["_timestamp"].iloc[0]), "end": str(window["_timestamp"].iloc[-1]), "kept": False, "reason": "relative slope exceeds threshold", "score": float(score) if np.isfinite(score) else None})
                     continue
                 stable_windows.append((window, score))
             if len(stable_windows) > cfg.max_windows_per_phase:
                 chosen = np.linspace(
                     0, len(stable_windows) - 1, cfg.max_windows_per_phase, dtype=int
                 )
-                stable_windows = [stable_windows[i] for i in np.unique(chosen)]
+                selected = set(np.unique(chosen))
+                for i, (window, score) in enumerate(stable_windows):
+                    if i not in selected:
+                        diagnostics.append({"phase": phase, "start": str(window["_timestamp"].iloc[0]), "end": str(window["_timestamp"].iloc[-1]), "kept": False, "reason": "per-phase window cap", "score": score})
+                stable_windows = [stable_windows[i] for i in sorted(selected)]
             for window, score in stable_windows:
                 rows.append(
                     _summarize_window(
@@ -227,21 +274,29 @@ def build_plateau_training_frame(
                     )
                 )
                 counts[f"{key}_kept"] += 1
+                if recording_id:
+                    rows[-1]["recording_id"] = recording_id
+                if "resistance_unit" in source:
+                    rows[-1]["resistance_unit"] = str(source["resistance_unit"].iloc[0])
+                diagnostics.append({"phase": phase, "start": str(window["_timestamp"].iloc[0]), "end": str(window["_timestamp"].iloc[-1]), "kept": True, "reason": "stable", "score": score})
         exposures.append(
             {
                 "exposure_id": exposure_id,
                 "label": label,
                 "duration_seconds": duration_s,
+                "start": str(smell_start), "end": str(smell_end),
+                "plateau_start": str(plateau_start), "plateau_end": str(plateau_end),
+                "windows": diagnostics, "rejection_reasons": reasons,
                 **counts,
             }
         )
 
-    if not rows:
+    if not rows and not allow_empty:
         raise ValueError(
             "plateau extraction produced no stable windows; relax max_relative_slope "
             "or inspect the timestamp/label transitions"
         )
-    result = pd.DataFrame(rows)
+    result = pd.DataFrame(rows, columns=None if rows else [*ALL_SENSORS, "Gas name", "session_id", "exposure_id"])
     classes = {str(k): int(v) for k, v in result["Gas name"].value_counts().items()}
     report: Dict[str, Any] = {
         "profile": "plateau",
@@ -249,7 +304,8 @@ def build_plateau_training_frame(
         "input_rows": int(len(df)),
         "invalid_timestamp_rows": invalid_time,
         "segments": int(len(segments)),
-        "exposures": int(len(exposures)),
+        "exposures": sum("exposure_id" in exposure for exposure in exposures),
+        "unpaired_exposures": sum("exposure_id" not in exposure for exposure in exposures),
         "sessions": int(result["session_id"].nunique()),
         "output_windows": int(len(result)),
         "class_windows": classes,

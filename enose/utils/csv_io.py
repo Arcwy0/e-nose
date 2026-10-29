@@ -31,6 +31,7 @@ def parse_uploaded_enose_csv(
     text: str,
     label_column: str = "Gas name",
     pcb_resistance_unit: str = "ohm",
+    recording_date: Optional[str] = None,
 ) -> tuple[pd.DataFrame, dict]:
     """Parse a normal CSV or recover the recorder's variable-width format.
 
@@ -52,9 +53,10 @@ def parse_uploaded_enose_csv(
         frame = pd.read_csv(StringIO(text), low_memory=False)
         if any(str(name).startswith(("rs_ch", "raw_ch")) for name in frame.columns):
             from .pcb_csv import normalize_pcb_recording
-            return normalize_pcb_recording(frame, pcb_resistance_unit)
+            return normalize_pcb_recording(frame, pcb_resistance_unit, recording_date)
         return frame, {
             "parser": "standard",
+            "source_rows": len(frame),
             "recovered_rows": 0,
             "dropped_rows": 0,
             "environment_reliable": all(sensor in frame.columns for sensor in ENVIRONMENTAL_SENSORS),
@@ -63,7 +65,9 @@ def parse_uploaded_enose_csv(
     records = []
     dropped = 0
     repaired = 0
-    for fields in reader:
+    source_rows = 0
+    for source_row, fields in enumerate(reader):
+        source_rows += 1
         if len(fields) < 20:
             dropped += 1
             continue
@@ -81,7 +85,7 @@ def parse_uploaded_enose_csv(
             dropped += 1
             continue
         label = fields[label_index].strip()
-        row = {"Timestamp": fields[0].strip(), label_column: label}
+        row = {"Timestamp": fields[0].strip(), label_column: label, "_source_row": source_row}
         row.update({sensor: float(value) for sensor, value in zip(RESISTANCE_SENSORS, resistances)})
         # Only trust environment fields when the label is in its canonical
         # position. Variable-length UART fragments cannot be disambiguated.
@@ -101,6 +105,7 @@ def parse_uploaded_enose_csv(
         raise ValueError("variable-width CSV recovery produced no valid rows")
     return pd.DataFrame(records), {
         "parser": "variable_width_recovery",
+        "source_rows": source_rows,
         "recovered_rows": repaired,
         "dropped_rows": dropped,
         "environment_reliable": False,

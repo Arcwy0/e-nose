@@ -19,6 +19,7 @@ Two routes:
 from __future__ import annotations
 
 import json
+import asyncio
 import os
 import tempfile
 import traceback
@@ -26,12 +27,20 @@ from typing import Any, Dict, List
 
 from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 from PIL import Image
+from starlette.concurrency import run_in_threadpool
 
 from enose.vision.florence import process_image_with_vlm
 
 from .. import state
 
 router = APIRouter()
+_vision_lock = asyncio.Lock()
+
+
+async def run_vision_inference(*args, **kwargs):
+    """One model call at a time, without blocking health/sensor HTTP handling."""
+    async with _vision_lock:
+        return await run_in_threadpool(process_image_with_vlm, *args, **kwargs)
 
 
 def _require_vlm() -> None:
@@ -75,7 +84,7 @@ async def predict_object(
     temp: str | None = None
     try:
         temp = await _save_upload(image)
-        result = process_image_with_vlm(
+        result = await run_vision_inference(
             state.vlm_model,
             state.vlm_processor,
             temp,
@@ -151,7 +160,7 @@ async def predict_scene(
         # phrase-like shape it grounds best on.
         caption = " ".join(f"A {l}." for l in label_list)
 
-        result = process_image_with_vlm(
+        result = await run_vision_inference(
             state.vlm_model,
             state.vlm_processor,
             temp,

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import datetime
+from enose import __version__
 
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import JSONResponse
@@ -27,7 +28,7 @@ async def root() -> dict:
     """Server status — mirrors the legacy root payload so existing clients keep working."""
     return {
         "message": "E-Nose Multimodal Server",
-        "version": "3.2.2",
+        "version": __version__,
         "status": "running",
         "sensor_configuration": {
             "resistance_sensors": RESISTANCE_SENSORS,
@@ -66,7 +67,7 @@ async def health_check() -> dict:
     return {
         "status": "healthy",
         "timestamp": datetime.datetime.now().isoformat(),
-        "version": "3.2.2",
+        "version": __version__,
         "features": {
             "total_features": 22,
             "resistance_sensors": len(RESISTANCE_SENSORS),
