@@ -13,23 +13,30 @@ for drift scoring — comes out of the objects in this sub-package.
 
 ### `BalancedRFClassifier` (default)
 
-`balanced_rf.py` — `BalancedRandomForestClassifier` wrapped in
-`CalibratedClassifierCV` (sigmoid / Platt scaling). Used by the server by
+`balanced_rf.py` — `BalancedRandomForestClassifier` with optional sigmoid /
+Platt calibration using group-disjoint, fold-local preprocessing. Used by the server by
 default; also the parent class for `XGBTabularClassifier` so the two share
 the same preprocessing, diagnostics, persistence, and metric-capture paths.
 
 **Pipeline:**
-1. `preprocessing.sanitize_environmentals` clamps T/H/CO2/H2S/CH2O into the
-   sane ranges declared in `config.ENV_SANITY_RANGES`. NaNs and
-   out-of-range values get the per-sensor median or the configured default.
-2. `ensure_canonical_columns` fills missing sensor columns with defaults so
-   a partial dict still classifies.
-3. `StandardScaler` is fit on R1–R17 **only** — environmental sensors stay
-   in raw engineering units so drift and OOD distances remain interpretable.
-4. `BalancedRandomForestClassifier` → `CalibratedClassifierCV(method="sigmoid")`.
-5. After fitting, a held-out test report is written via `_log_test_report` —
-   this is where per-class P/R/F1 and the confusion matrix are captured
-   (see **Metrics capture** below).
+
+1. Split raw data into independent groups before learning medians, clipping,
+   baseline references or scaling. No valid class-complete split means no
+   reported holdout accuracy, not a random-row fallback.
+2. Sanitize environmental values and learn resistance cleaning on the training
+   partition. Default model features are R1–R17; environmental values remain
+   transport-compatible but are not required. Invalid physical PCB measurements
+   are rejected by acquisition/API guards, not silently repaired into evidence.
+3. Apply the configured baseline representation (`none`, `delta`, `ratio`,
+   `logratio`) and optional SNV/log shaping. Default scaling is `RobustScaler`;
+   standard scaling is configurable. Live baseline updates propagate to each
+   calibrated fold worker and outer diagnostics.
+4. Fit RF with group-disjoint calibration folds. `GroupCalibratedEstimator`
+   retains each fold's preprocessing/calibrator. Calibration is disabled when
+   independent groups are insufficient, rather than using row-wise CV.
+5. Freeze held-out per-class/confusion metrics, then refit deployment state on
+   the available training data. These metrics do not measure the refitted model
+   on an independent new day or compare it with a previous deployment.
 6. Online update = merge new rows with the stored history
    (`last_training_data`) and refit from scratch. This keeps the model
    deterministic rather than accumulating hidden state from partial fits.
@@ -38,7 +45,7 @@ the same preprocessing, diagnostics, persistence, and metric-capture paths.
 
 | Method | Description |
 |---|---|
-| `train(X, y, ...)` | Full (re)training. Returns balanced accuracy. Populates `per_class_metrics_`, `confusion_matrix_`, `confusion_labels_`, `last_test_size_`. |
+| `train(X, y, groups=..., ...)` | Full fit; returns balanced accuracy or `None` when independent validation is not estimable. |
 | `online_update(X, y, ...)` | Appends rows to `last_training_data` and retrains. New classes are handled automatically (full retrain, not a partial fit). |
 | `predict(X)` | Returns list of label strings. |
 | `predict_proba(X)` | Returns `(n_samples, n_classes)` calibrated probabilities. |
@@ -75,9 +82,8 @@ pick them up.
 
 ## Metrics capture
 
-Every `train()` call ends with `_log_test_report(X_test, y_test, y_pred)`.
-On top of printing the sklearn report, it persists four structured fields
-on `self`:
+When a valid class-complete group holdout exists, `train()` captures the report
+before final refitting and persists four structured fields on `self`:
 
 ```python
 self.per_class_metrics_   # dict[class -> {precision, recall, f1-score, support}]
@@ -85,6 +91,11 @@ self.confusion_matrix_    # list[list[int]]  — JSON-serialisable
 self.confusion_labels_    # list[str]         — row/column order
 self.last_test_size_      # int               — held-out sample count
 ```
+
+Without usable independent groups, `validation_strategy_="not_estimable"`,
+accuracy is `None`, confusion matrix is absent and test size is zero. The UI
+explains this explicitly. Inferred exposure IDs are grouping aids, not verified
+physical independence. Per-class training counts are not holdout supports.
 
 These are what the UI's Model Info tab renders:
 
@@ -196,6 +207,7 @@ size until the next retrain.
 | `diagnostics.py` | `diagnose_sample`, `compute_z_scores`, `compute_ood_score`, `nearest_centroid` |
 | `persistence.py` | `build_save_payload`, `save`, `load` (with legacy fallback) |
 | `training.py` | `retrain_with_all_data()` — server-level retrain helper used by `/smell/online_learning` when new classes appear |
+| `registry.py` | Stage candidate model/history pairs, bind paired evidence to artifact hashes, promote with overrides and preserve rollback snapshots |
 | `xgb_config.py` | `XGBClassifierConfig` dataclass |
 | `xgb_features.py` | Pure window-feature functions for the legacy windowed path (no state) |
 
@@ -225,15 +237,22 @@ import pandas as pd
 from enose.classifier import BalancedRFClassifier
 
 X = pd.DataFrame([
-    {"R1": 15.2, "R2": 8.3, ..., "T": 21.0, "H": 49.0, "CO2": 400, "H2S": 0, "CH2O": 5},
+    {**{f"R{i}": 10.0 + i for i in range(1, 18)},
+     "T": 21.0, "H": 49.0, "CO2": 400, "H2S": 0, "CH2O": 5},
 ])
 y = pd.Series(["coffee"])
 
 clf = BalancedRFClassifier()
 acc = clf.train(X, y, use_augmentation=True, n_augmentations=5)
-print(f"Balanced accuracy: {acc:.3f}")
+print("Balanced accuracy:", acc if acc is not None else "not estimable")
 print(clf.per_class_metrics_)   # newly populated
 print(clf.confusion_matrix_)
 
 clf.save_model("trained_models/")
 ```
+
+This single-class toy example illustrates the interface only; it cannot estimate
+generalization or demonstrate useful recognition. Supply independently acquired
+group IDs for evaluation. The server's safer CSV workflow previews and stages
+before deployment; direct `save_model()` is not candidate staging.
+See [training/deployment](../../docs/SERVER_CLIENT_GUIDE.md#training-and-candidate-deployment).

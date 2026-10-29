@@ -22,7 +22,7 @@ A robotic olfaction system combining a **Florence-2** vision model with a **17-c
 ## Quick start
 
 > **First time on this machine?** Read [`docs/SETUP.md`](docs/SETUP.md) —
-> it walks through the venv, `pip install`, Florence-2 download, and
+> it walks through isolated environments, locked installation, Florence-2 download, and
 > `.env` setup. The steps below assume that's done.
 
 ### Install the server — one lock for Docker, pip, and uv
@@ -35,12 +35,11 @@ tokenizers **0.19.1**. Keep the server and hardware client in separate environme
 **Windows PowerShell, fresh server environment:**
 
 ```powershell
-py -3.10 -m venv .venv
-.\.venv\Scripts\Activate.ps1
-python -m pip install --upgrade "pip==24.3.1"
-python -m pip install -r requirements-server.txt
-python -m pip install --no-deps -e .
-python -m pip check
+uv venv --python 3.10 .venv-server
+.\.venv-server\Scripts\Activate.ps1
+uv pip sync --python .venv-server requirements-server.txt
+uv pip install --python .venv-server --no-deps -e .
+uv pip check --python .venv-server
 ```
 
 **Linux, fresh server environment:**
@@ -67,11 +66,10 @@ Use `uv pip sync` with this lock; `uv sync` is not the documented installation
 path. Activate the environment before the commands below. Docker installs
 this same lock and retains **FlashAttention 2.7.3**. Native Windows, or Linux
 without a CUDA compiler, uses the tested eager-attention fallback. Native Linux
-CUDA extension installation is described in [`docs/SETUP.md`](docs/SETUP.md#flashattention--retained-for-docker--linux-cuda).
+CUDA extension installation is described in [`docs/SETUP.md`](docs/SETUP.md#flashattention-and-platform-differences).
 
 For an existing installation, create a fresh environment from the lock rather
-than upgrading individual ML libraries. The old **3.2.0 wheel does not contain
-the 3.2.1 dependency/loader fixes**; client-only users can continue using it.
+than upgrading individual ML libraries.
 Use [release v3.3.0](https://github.com/Arcwy0/e-nose/releases/tag/v3.3.0) for
 PCB acquisition, configurable monitored heating, backend-aware preflight,
 CSV previews, and staged model deployment. It retains the v3.2.2 Florence fixes.
@@ -79,7 +77,7 @@ Update both server and client; the dependency lock is unchanged. Older wheels
 do not contain the new PCB workflow.
 
 Florence weights, trained smell models, and experimental datasets are separate
-from the wheel and source checkout. Follow the [download instructions](docs/SETUP.md#3-download-florence-2-large)
+from the wheel and source checkout. Follow the [download instructions](docs/SETUP.md#3-florence-2-large-model-files)
 and [migration guide](docs/MIGRATION.md) when moving PCs.
 
 ### 1 — Server (classifier only, no GPU / VLM required)
@@ -95,7 +93,7 @@ Windows PowerShell:
 
 ```powershell
 $env:ENOSE_NO_VLM = "1"
-python scripts/run_server.py --host 0.0.0.0 --port 8016
+uv run --active --no-project enose-server --host 0.0.0.0 --port 8016
 ```
 
 Open **http://localhost:8080/ui** for the default port, or
@@ -113,8 +111,8 @@ Windows PowerShell:
 
 ```powershell
 $env:ENOSE_NO_VLM = "0"
-python scripts/verify_server_environment.py --vlm
-python scripts/run_server.py --host 0.0.0.0 --port 8016
+uv run --active --no-project python scripts/verify_server_environment.py --vlm
+uv run --active --no-project enose-server --host 0.0.0.0 --port 8016
 ```
 
 Requires Florence-2 weights at `model/Florence-2-Large/`. The verification command
@@ -139,8 +137,20 @@ docker run --rm --gpus all -p 8016:8080 -v "$PWD":/app -w /app \
 ```
 
 For Docker smell-only mode, omit `--gpus all` and set `ENOSE_NO_VLM=1`.
+For an explicitly CPU-isolated run, also use `--runtime runc`,
+`-e NVIDIA_VISIBLE_DEVICES=void`, and `-e CUDA_VISIBLE_DEVICES=`; the default
+NVIDIA runtime may expose GPUs even without `--gpus`. Use one server worker.
+The API has no built-in authentication; keep it behind a trusted network/proxy.
 
 ### 3 — Client (offline / simulated sensors)
+
+Install the lightweight client in a **separate environment** first:
+[client quickstart](docs/CLIENT_QUICKSTART.md) or
+[Windows wheel setup](docs/CLIENT_WINDOWS_INSTALL.md). All options, defaults,
+menu items and browser equivalents are in the
+[complete client reference](enose/client/README.md#complete-cli-reference).
+The installed `enose-client` command works without a checkout; `scripts/`
+commands below require one. The wheel also installs `enose-server`.
 
 ```bash
 python scripts/run_client.py --offline --server http://localhost:8080
@@ -199,7 +209,7 @@ command is identical to the local case above, just with a different
 | What you want | How |
 |---|---|
 | Classify a single sample | Browser UI → **Classify** tab, paste 17 resistance values or all 22 values |
-| Classify via API | `POST /smell/test_console` with `{"values": "v1,v2,...,v22"}` |
+| Classify via API | `POST /smell/test_console` with `values` (17 or 22 numbers) and actual `resistance_unit` for verified-unit models |
 | Train on CSV data | Browser UI → **Train** tab, upload/paste CSV |
 | Train via API | `POST /smell/learn_from_csv` |
 | Simulate full pipeline | `python scripts/run_client.py --offline` |
@@ -215,8 +225,9 @@ workflow and independent-session benchmark.
 ## Live streaming, drift, and replay
 
 * **Client — live dashboard:** run the client with `--live` (or pick menu
-  option 8) to open a matplotlib window with the rolling sensor trace and
-  push every sample to the server for everyone else to watch in the UI.
+  option 8) to open a matplotlib window and publish latest samples to the UI.
+  Add `--headless` for browser-only display. Local recording precedes HTTP;
+  slow network inference may skip published frames without blocking capture.
   ```bash
   python scripts/run_client.py --offline --live --live-classify \
       --live-label coffee --record-session runs/coffee_2026-04-23.npz
@@ -224,15 +235,15 @@ workflow and independent-session benchmark.
 * **UI — Live tab:** polls `/sensor/live/recent` once per second and draws
   R-sensor / env / confidence charts plus a drift panel comparing the live
   buffer against the training distribution.
-* **`scripts/replay.py`:** reads a `.npz` recorded by `--record-session`
+* **`python -m enose.client.replay`** (or checkout `scripts/replay.py`) reads a `.npz` recorded by `--record-session`
   and re-runs it through `/smell/classify` so you can verify that a saved
   session still predicts the expected label after a retrain.
 * **Out-of-distribution indicator:** every `/smell/classify` response now
   includes an `ood` block (score, nearest centroid, status). The UI
   renders it as a green / yellow / red badge above the result.
-* **Per-class metrics:** `/smell/model_info` now returns
-  `per_class_metrics` and `confusion_matrix` from the last training split,
-  shown as a table in the UI's Model Info tab.
+* **Per-class metrics:** `/smell/model_info` returns metrics from an independent
+  group holdout when possible. Otherwise accuracy is null and the UI explains
+  why generalization is not estimable; a row split is not substituted.
 * **New plots** from `/smell/visualize_data`: per-class feature importance
   (one-vs-rest F-ratio heatmap) and calibration / reliability diagram with
   Expected Calibration Error (ECE).
@@ -264,8 +275,13 @@ docs/
 
 | Group | Sensors | Preprocessing |
 |---|---|---|
-| Resistance (R1–R17) | 17 MOS sensors | ADC → Ω on client; StandardScaler on server |
-| Environmental | T, H, CO2, H2S, CH2O | Raw engineering units, sanity-clamped |
+| Resistance (R1–R17) | 17 resistance channels | PCB: firmware-calibrated ohms; legacy: client ADC/RLOW conversion in experiment units; optional baseline representation and scaling on server |
+| Environmental | T, H, CO2, H2S, CH2O | Optional measured engineering values; absent channels use unmeasured defaults and are excluded from R-only models |
+
+The PCB's heater temperature, faults and duty are diagnostics, not ambient
+temperature or smell-model features. Physical channel equivalence between
+boards has not been verified. Never merge new ohm data into unverified legacy
+units or treat an unlabelled recording as chemical ground truth.
 
 ## API overview
 
@@ -283,6 +299,11 @@ docs/
 | `/smell/debug_input` | POST | Diagnostics (z-scores, OOD, centroids) |
 | `/smell/online_learning` | POST | Incremental training |
 | `/smell/learn_from_csv` | POST | Batch CSV training |
+| `/smell/preview_csv` | POST | Preview labels, extraction and retained/rejected source windows without fitting |
+| `/smell/models/candidates` | GET | List staged candidates |
+| `/smell/models/evaluate` | POST | Compare active/candidate on the same independent labelled CSV |
+| `/smell/models/promote` | POST | Explicit deployment with comparison/override checks and rollback snapshot |
+| `/smell/models/rollback` | POST | Restore a model/history snapshot |
 | `/smell/model_info` | GET | Classes, accuracy, per-class P/R/F1, confusion matrix |
 | `/smell/visualize_data` | GET | Generate plots (incl. per-class importance, calibration) |
 | `/smell/drift` | GET | Live-vs-training per-sensor drift report |
@@ -298,9 +319,24 @@ docs/
 |---|---|---|
 | `ENOSE_NO_VLM` | `0` | Set to `1` to skip Florence-2 (smell-only mode) |
 | `ENOSE_CLASSIFIER` | `balanced_rf` | Classifier backend: `balanced_rf` or `xgb` |
+| `ENOSE_BASELINE_MODE` | `none` | New classifier config: `none`, `delta`, `ratio`, `logratio`; saved model/explicit CSV settings take precedence |
+| `ENOSE_SNV` | off | New classifier config SNV normalization; not a conversion of an existing saved model |
 | `SERVER_HOST` | `0.0.0.0` | Bind address |
 | `SERVER_PORT` | `8080` | Listen port |
 | `ENOSE_RLOW` | `1.0` | Client-side load resistance for ADC conversion; `--rlow` overrides it |
+| `ENOSE_VISION_TIMEOUT` | `30` | Client object-detection HTTP deadline, seconds |
+| `ENOSE_SCENE_TIMEOUT` | `60` | Client scene-description HTTP deadline, seconds |
+
+`.env` is not auto-loaded. Set/export variables in the relevant process or pass
+Docker `--env-file`. RLOW affects **legacy client** conversion only. Heater
+settings, backend selection and live controls are client CLI options, not
+server environment variables.
+
+For CSV training the browser/menu defaults are plateau extraction, log-ratio
+baseline, augmentation off and candidate staging on. Direct API defaults remain
+raw/no-baseline, augmentation on and immediate update for compatibility.
+Historical merging defaults to on in both; see
+[training and deployment](docs/SERVER_CLIENT_GUIDE.md#training-and-candidate-deployment).
 
 ## License
 
@@ -311,7 +347,7 @@ distribute, and sublicense freely. Attribution (the copyright notice in
 Third-party components keep their own licenses:
 
 - **Florence-2-Large** weights (downloaded separately, see
-  [`docs/SETUP.md`](docs/SETUP.md#3-download-florence-2-large)) — MIT,
+  [`docs/SETUP.md`](docs/SETUP.md#3-florence-2-large-model-files)) — MIT,
   © Microsoft.
 - All Python dependencies listed in `pyproject.toml` are permissively
   licensed (MIT / BSD / Apache 2.0) and compatible with MIT
@@ -320,6 +356,8 @@ Third-party components keep their own licenses:
 ## Further reading
 
 - [**Setup guide**](docs/SETUP.md) — clone → venv → download Florence-2 → first classification
+- [**Client quickstart**](docs/CLIENT_QUICKSTART.md) — PCB, legacy, replay, preflight and live examples
+- [**Client options**](enose/client/README.md#complete-cli-reference) — every flag/default and menu/UI equivalents
 - [**PC migration guide**](docs/MIGRATION.md) — move code, weights, trained models, data, and configuration safely
 - [**Stable/drift-robust training**](docs/MODEL_IMPROVEMENTS.md) — plateau extraction, recommended settings, live workflow, and benchmark
 - [Chemist guide](docs/CHEMIST_GUIDE.md) — no Python needed

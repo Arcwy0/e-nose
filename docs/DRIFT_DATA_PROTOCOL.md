@@ -1,6 +1,6 @@
 # Multi-day data-collection protocol (for drift validation)
 
-To *prove* the classifier is robust to day-to-day sensor drift, we need recordings of the
+To measure robustness to day-to-day sensor drift, collect recordings of the
 **same smells on different days**, each with a clean-air baseline. This is the input the
 cross-session eval harness (`scripts/eval_drift.py`) needs, and the data pattern the
 drift-robust modes are designed for.
@@ -15,10 +15,15 @@ reveals the real failure — and lets us measure the fix (baseline-relative feat
 
 Per day (≥ 2 days, ideally 3–4; more days = stronger evidence):
 
-1. **Clean-air baseline** — 30–60 s of clean air at the start, *before* any smell. Label `air`.
+1. **Clean-air baseline** — at least 60 s of stable clean air before each exposure;
+   record longer if recovery/settling requires it. Label only confirmed clean air `air`.
    This is the R₀ reference the drift-robust mode subtracts.
 2. **Each target smell** — e.g. `rose`, `coffee` (pick ≥ 2, keep the set identical across days).
-   ~30–60 s each. Purge with clean air between smells (the robot's PURGE phase, or just wait).
+   Record onset, full response, stable plateau, removal and recovery. A 30–60 s
+   entire exposure is not sufficient for the current default plateau extractor:
+   final 25% minus a 30 s end margin must contain a full 60 s window, so exposures
+   shorter than roughly six minutes may yield none. Inspect preview; select
+   scientifically justified settings rather than forcing every trace to pass.
 3. Keep the sensor rig, gain and wiring **unchanged** across days — we want to capture *natural*
    drift, not a hardware change.
 
@@ -27,20 +32,29 @@ accumulates between sessions.
 
 ## File format
 
-One CSV (append days into it, or one CSV per day and concatenate). Required columns:
+One CSV per recording is easiest to audit; combine only while retaining units
+and identity. Use verified labels/annotations. Canonical columns:
 
 | Column | Meaning |
 |---|---|
 | `R1`…`R17` | resistance sensors (as the client already logs them) |
-| `T,H,CO2,H2S,CH2O` | environmental channels |
+| `T,H,CO2,H2S,CH2O` | Optional measured ambient/environmental channels; no heater temperature here |
+| `resistance_unit` | Verified `ohm`, `kohm`, or `mohm`; never guessed from old RLOW |
 | `smell_label` (or `Gas name`) | `air`, `rose`, `coffee`, … (lowercased) |
 | **`session_id`** | **one distinct value per day/recording** — this is the grouping the harness splits on |
+| `exposure_id` | One ID per complete air/analyte pair; avoid splitting one exposure across folds |
+| `Timestamp` | Required for plateau extraction; retain real date and acquisition timing |
 
 `session_id` is the critical field: it's how leave-one-session-out training simulates
-"train on day 1–2, test on day 3". `timestamp` is nice to have but optional.
+"train on day 1–2, test on day 3". Time-only supplier exports need recording date
+and session identity. Their `rs_ch*_ohm` channels are already resistances;
+normalization maps them by index without proving cross-board sensor equivalence.
 
-> The client already stamps a per-run `session_id` (`enose/client/live.py`), and
-> `data/database_robodog_time_windows.csv` shows the exact schema (`session_id`, `segment_id`).
+The client stamps a publisher session ID and records acquisition metadata in
+NPZ. Keep physical board/configuration, channel mapping, calibration, heater
+target/actual temperature/faults, flow/distance/concentration and event timing
+in the experimental record. Supplier filenames do not establish chemical labels.
+Retain raw sequences privately even when fitting only stable windows.
 
 ## How to validate once collected
 
@@ -50,19 +64,22 @@ docker exec -i enose-srv python scripts/eval_drift.py \
     --csv data/<your_multiday>.csv --session-col session_id
 ```
 
-**Success:** the `logratio` / `logratio+snv` rows show materially higher cross-session balanced
-accuracy than `none` (absolute). If `none` is already high, either drift is mild in your data or
-sessions are too few/too similar — collect more spread-out days.
+Compare absolute/logratio/SNV on the same independent held-out sessions; report
+per-class errors and the protocol, including clean-air adaptation. Improvement
+is an experimental result, not guaranteed. This harness uses held-out-session
+clean air; registry paired evaluation instead uses persisted training-baseline
+fallbacks. State which protocol produced a number. Never select a model from
+different internal holdouts or random adjacent rows alone.
 
 ## Then deploy the drift-robust model
 
-Train with the mode on (env override, no code change):
+Use Train preview → Stable plateaus → Balanced RF + logratio, augmentation/SNV
+off initially, verified units and candidate staging on. Historical merge stays
+on for compatible Idea 1 data; choose replacement for a controlled dataset-only
+experiment. Independently compare and explicitly promote in Model Info.
 
-```bash
-ENOSE_BASELINE_MODE=logratio ENOSE_SNV=1 python scripts/run_server.py
-# …train via the UI / learn_from_csv on the multi-day CSV…
-# at the start of each session, POST 30–60 s of clean air to /smell/baseline
-```
-
-The absolute pipeline stays the default (`ENOSE_BASELINE_MODE` unset) — nothing changes for
-offline / same-day work.
+Capture fresh live clean air after board/configuration/session changes,
+deployment reload or server restart. `--live-baseline` is only a plot option.
+Environment overrides do not retroactively convert a saved model or replace
+explicit CSV request settings. See [training details](MODEL_IMPROVEMENTS.md),
+[client options](../enose/client/README.md), and [PCB safety](PCB_ACQUISITION.md).

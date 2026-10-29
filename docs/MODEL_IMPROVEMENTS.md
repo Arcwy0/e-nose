@@ -34,16 +34,41 @@ Open `/ui`, select **Train**, and use:
 | Data augmentation | Off |
 | SNV | Off |
 | Merge with historical data | On for normal Idea 1 learning; off for a controlled one-dataset experiment |
+| Stage candidate | On; active deployment changes only after explicit promotion |
 
-Stable-plateau training requires `Timestamp`, `Gas name`, and `R1`–`R17`.
+Stable-plateau training requires timestamps, verified labels, and R1–R17.
+Canonical recordings can use `Timestamp` and the selected label column;
+supplier Rs exports use `timestamp_iso` and `rs_ch0_ohm`–`rs_ch16_ohm`, with
+verified labels or explicit source-row annotations added by the operator.
 Environmental columns are optional. A model trained without usable
 environmental data automatically uses only the 17 resistance channels.
+
+Version 3.3.0 adds no-fit preview with retained/rejected traces, adjustable
+extraction parameters, recording date/session identity and verified row-range
+annotations. Default extraction remains 60 s window/stride, 600 s clean-air
+tail, final 25% analyte exposure, 30 s end margin, slope limit 0.002. Analyte
+exposures shorter than roughly six minutes may retain no full window. Unlabelled
+preview/replay works, but waveform shape never supplies chemical ground truth.
+
+Declare actual resistance units. The new PCB is ohms by default; RLOW applies
+only to legacy ADC conversion. Unit/configuration provenance and a same-board,
+same-session clean-air baseline guard live predictions and historical merging.
+The PCB's heater temperature is not ambient `T` or a classifier feature.
 
 If the server's existing canonical history was created with the legacy
 every-row workflow, make the first stable-plateau upload with **Merge history
 off**. That one-time replacement prevents the old transient rows from being
 mixed back into the cleaned dataset. Leave history merging on for subsequent
 Idea 1 updates.
+
+Staging keeps the current model/history unchanged even with merge off. Use
+Model Info to compare both models on the same independent labelled CSV, then
+promote explicitly and keep the rollback ID. First deployment without paired
+evidence needs an unevaluated override. Exact training-row overlap is rejected,
+but true exposure independence still needs operator confirmation. See
+[deployment details](SERVER_CLIENT_GUIDE.md#training-and-candidate-deployment).
+Direct API callers must request these recommended settings: API defaults remain
+raw/no-baseline, augmentation on and immediate update for compatibility.
 
 The two-stage response-shape classifier remains in the menu as an experimental
 comparison. It separates air reliably in the available later recording, but it
@@ -57,6 +82,8 @@ A baseline-relative model needs a baseline from the **same session**:
 2. Stream readings from the client to the server.
 3. In the UI's **Live** tab, click **Set clean-air baseline**. The server rejects
    a window that is too short or still changing.
+   The baseline binds to board/configuration, connection segment and publisher
+   session. Recapture after those change, model reload or server restart.
 4. Approach the sample, wait until the response stabilizes, then click
    **Classify stable window**. This classifies the median of the stable window,
    not a noisy instantaneous row.
@@ -96,6 +123,9 @@ GET  /smell/recovery?window=15&response_threshold=0.12
 clean-air readings. Sending only `R1`–`R17` is supported.
 
 ## Independent benchmark on the supplied recordings
+
+The following tables report earlier experiments, not a fresh v3.3.0 benchmark.
+The new acquisition/safety/evaluation checks do not establish a new accuracy gain.
 
 Run the benchmark inside the server image:
 
@@ -201,7 +231,9 @@ Evaluate by leaving out complete days or exposure repetitions. Do not use a
 random row split as the scientific result. Once this dataset exists, compare
 the log-ratio RF against a temporal model on complete sequences.
 
-The Model Info page now states the validation strategy. If the available
-exposures cannot produce a group-disjoint holdout containing every class, the
-UI warns that its row-split metric is optimistic. The complete confusion matrix
-is still shown, but it is not a cross-day performance claim.
+The current Model Info page states the validation and calibration strategies.
+If exposures cannot produce a group-disjoint holdout with every class in both
+partitions, accuracy is null (`not_estimable`) and holdout metrics are empty.
+There is no row-wise fallback. Learned preprocessing and calibration are
+group-isolated; the final deployment fit happens after holdout metrics freeze.
+This improves evaluation validity, not proven cross-day chemical accuracy.

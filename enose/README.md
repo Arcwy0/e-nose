@@ -9,8 +9,8 @@ is the map that points you at the right one.
 | Package | What lives there | Touch when… |
 |---|---|---|
 | [`classifier/`](classifier/README.md) | `BalancedRFClassifier`, `XGBTabularClassifier`, preprocessing, diagnostics, persistence, per-class metrics capture | Changing the model / features, adding a new backend, tweaking OOD gating |
-| [`server/`](server/README.md) | FastAPI app, routes (`health`, `smell`, `training`, `analytics`, `live`, `ui`), `state.py`, `live_buffer.py` (ring buffer for live streaming) | Adding an endpoint, editing the browser UI, changing server state |
-| [`client/`](client/README.md) | Sensor reader, webcam, HTTP client, `live.py` publisher + plot, `session.py` recorder, training pipeline, CLI | Adding a menu option, changing how raw ADC is transformed, touching the live dashboard |
+| [`server/`](server/README.md) | FastAPI routes including CSV preview and candidate deployment; process-local state/buffers/locks | API/UI and server state |
+| [`client/`](client/README.md) | PCB/legacy/replay acquisition, heater/lifecycle/preflight, HTTP, camera, recording and CLI | Acquisition, controls and live dashboard |
 | [`visualization/`](visualization/README.md) | Matplotlib plots: confusion matrix, feature importance, per-class F-ratio heatmap, calibration / reliability diagram, environmental histograms | Adding a plot or changing how `generate_all_plots` wires them up |
 | [`vision/`](#vision) | Florence-2 loader, GPU detection | Swapping the VLM or GPU check |
 | [`utils/`](#utils) | CSV I/O helpers | New CSV format / label column rules |
@@ -20,11 +20,11 @@ is the map that points you at the right one.
 ### Live streaming loop (`--live` on the client)
 
 ```
-enose/client/sensors.py
+enose/client/pcb.py / sensors.py / pcb_replay.py
       │    read_single_measurement()            22-feature dict
       ▼
-enose/client/live.py  (LivePublisher thread)
-      │    POST /sensor/live/push               HTTP ~5 Hz
+enose/client/live.py  (acquisition + bounded latest-sample network queue)
+      │    POST /sensor/live/push               best-effort HTTP publication
       ▼
 enose/server/routes/live.py
       │    buffer.push(entry)
@@ -35,9 +35,23 @@ enose/server/live_buffer.py  (thread-safe ring, default 1000 slots)
 enose/server/routes/ui.py  (Live tab, inline SVG charts)
 ```
 
-`enose/client/session.py` tees off the publisher's callback chain to append
-every entry to an `.npz` file; `scripts/replay.py` replays that file back
-against `/smell/classify`.
+`enose/client/session.py` records locally acquired readings before HTTP;
+network-skipped frames remain without predictions. It does not guarantee every
+MCU frame is sampled. `python -m enose.client.replay` reclassifies NPZ without
+converting units. `scripts/replay.py` is a checkout-only wrapper.
+
+For all client settings/defaults and menu/UI equivalents see the
+[complete CLI reference](client/README.md#complete-cli-reference).
+
+### CSV and deployment
+
+`utils/training_preview.py` prepares both preview and training. Preview never
+fits or changes active state. UI/menu stage by default; `classifier/registry.py`
+stores candidate model/history pairs. Paired independent evaluation, explicit
+promotion and rollback are in `server/routes/models.py`. Historical merging is
+a separate default-on policy. API defaults remain immediate for compatibility.
+Group-isolated validation reports null metrics when independent groups are
+insufficient, rather than silently substituting a row split.
 
 ### Classify + OOD loop (`/smell/classify`)
 
@@ -82,7 +96,7 @@ Frequently touched keys:
 |---|---|
 | `ALL_SENSORS` / `RESISTANCE_SENSORS` / `ENVIRONMENTAL_SENSORS` | Feature ordering everywhere. Change = schema change. |
 | `N_FEATURES` | Server exposes this via `/` so the client's feature count check has something to compare against. |
-| `RLOW`, `VCC`, `EG`, `VREF`, `COEF` | Client-side ADC → resistance transform. |
+| `RLOW`, `VCC`, `EG`, `VREF`, `COEF` | Legacy client ADC transform only; PCB firmware supplies calibrated resistance. |
 | `ENV_SANITY_RANGES` / `ENV_SANITY_MEDIANS` / `ENV_DEFAULTS` | Preprocessing (`preprocessing.sanitize_environmentals`). |
 | `DEFAULT_SERVER_URL` | Default for the client's `--server` flag and `scripts/replay.py`. |
 
@@ -105,3 +119,10 @@ classifier, live streaming, drift, and every other endpoint still work.
 | `parse_semicolon_enose_csv(path)` | Handle semicolon-delimited exports |
 | `save_training_samples(data, labels, path)` | Append samples to the training log CSV |
 | `ensure_canonical_columns(df)` | Fill missing sensor columns with defaults |
+
+`pcb_csv.py` normalizes supplier Rs-mode exports without inventing smell
+labels; heater temperature stays diagnostic, not ambient `T`.
+`training_preview.py` handles verified row annotations, recording identity and
+retained/rejected extraction windows. `acquisition.py` guards units, physical
+sample validity and baseline identity. These safeguards do not prove electrical
+cross-board equivalence or new chemical-recognition accuracy.

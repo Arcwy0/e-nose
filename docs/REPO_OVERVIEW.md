@@ -1,7 +1,7 @@
 # E-Nose — Repository Overview
 
 A map of what lives in this repo, what each part does, how to run it, and the
-known problems/bugs. Written as the single "start here" reference for the
+known limitations. Current operational reference: **3.3.0**. Written for the
 robotic-olfaction stack (electronic nose + Unitree Go-1 + Florence-2 VLM).
 
 For deeper docs see: [`SETUP.md`](SETUP.md), [`SERVER_CLIENT_GUIDE.md`](SERVER_CLIENT_GUIDE.md),
@@ -15,7 +15,7 @@ and the Windows client guide [`CLIENT_WINDOWS_INSTALL.md`](CLIENT_WINDOWS_INSTAL
 ## 1. What the system is
 
 A robot dog (Unitree Go-1 EDU) carries an **electronic nose** (17 resistance MOS
-sensors + 5 environmental channels = 22 features) and RGB/depth cameras. A
+sensors plus 5 optional environmental transport channels) and RGB/depth cameras. A
 **FastAPI server** on a lab GPU box runs:
 
 - a **Florence-2 VLM** for open-vocabulary object detection / phrase grounding, and
@@ -35,7 +35,8 @@ drive the work:
 ```
 Go-1 Jetson (client)                         Lab GPU box (server)
 ──────────────────────                       ─────────────────────────────────
-e-nose UART ─┐                     REST/JSON
+PCB USB CDC ─┐                     REST/JSON
+legacy UART ─┤
 env UART   ──┼─► sensors.py ──►  ServerAPI ───────────►  FastAPI routes
 camera     ──┘   live.py (stream)                        ├─ vision  (Florence-2)
 robot/policy.py (Idea-1 FSM) ──────────────────────────► ├─ smell   (classify)
@@ -66,8 +67,9 @@ robot/policy.py (Idea-1 FSM) ─────────────────
 - **`live_buffer.py`** — thread-safe ring buffer of pose-tagged live samples.
 
 ### Classifier internals (`balanced_rf.py`)
-- `train()` — full fit: sanitize env → clean resistances → (log1p) → split → augment → scale →
-  fit `BalancedRandomForestClassifier` (optionally wrapped in `CalibratedClassifierCV`).
+- `train()` — split raw independent groups first, learn preprocessing/calibration
+  only within training folds, freeze holdout diagnostics, then refit deployment.
+  No usable independent group split means null accuracy, not a row-wise fallback.
 - `online_update()` — append a batch to retained training data and refit from scratch (supports new classes).
 - `predict()` / `predict_proba()` / `diagnose_sample()` (OOD z-scores + centroid distances).
 - `get_model_info()` — classes, per-class P/R/F1, confusion matrix, training history,
@@ -142,7 +144,7 @@ Install the server lock (see `SETUP.md`): `pip install -r requirements-server.tx
 then `pip install --no-deps -e .`. Docker and uv use the same complete pins.
 Client-only = `pip install -e ".[client]"` in a separate environment.
 
-Prebuilt client wheel for Windows colleagues: `enose-3.2.2-py3-none-any.whl`
+Prebuilt client wheel for Windows colleagues: `enose-3.3.0-py3-none-any.whl`
 from [GitHub Releases](https://github.com/Arcwy0/e-nose/releases/latest).
 → see [`CLIENT_WINDOWS_INSTALL.md`](CLIENT_WINDOWS_INSTALL.md).
 
@@ -156,8 +158,10 @@ from [GitHub Releases](https://github.com/Arcwy0/e-nose/releases/latest).
 | Web UI (classify/train/live/model-info) | ✅ Ready | Model Info auto-refreshes; dynamic per-class "Try" buttons |
 | **VLM (Florence-2)** | ✅ Ready to test | Loader + `/predict/object` + `/predict/scene` wired; needs weights + GPU (or slow CPU). `ENOSE_NO_VLM=1` disables cleanly |
 | **Robot simulation** | ✅ Ready to test | `sim_run.py` runs the full policy FSM vs a no-VLM server; no hardware needed |
-| Client packaging | ✅ Fixed | Split into `[client]`/`[server]` extras; universal wheel builds and installs on Windows |
-| Small-batch retrain | ✅ Fixed | Adaptive calibration CV — tiny new-class batches no longer 500 |
+| Client packaging | Software-tested | Separate extras and universal package wheel; native Windows GUI/USB requires field validation |
+| Calibration/holdout isolation | Implemented | Group-disjoint folds; no independent groups means calibration disabled / metrics not estimable |
+| New PCB acquisition/heating | Software-tested only | Default USB CDC, preflight, opt-in monitored PI; no host-loss watchdog guarantee |
+| CSV/model deployment | Implemented | Preview, annotations, staged candidate, paired evaluation, explicit promotion and recoverable rollback |
 | Real-robot ROS2 path | ⛔ Not ready | `enose/robot/ros2/*` raise `NotImplementedError` (Phase-0 work) |
 | Visual-servo integration | ⛔ Not ready | `policy._approach` sim-teleports; real depth-servo loop not wired |
 
@@ -167,10 +171,10 @@ from [GitHub Releases](https://github.com/Arcwy0/e-nose/releases/latest).
 
 | Issue | Severity | Status | Where |
 |---|---|---|---|
-| Small-batch retrain crash (calibration `cv` > class size) | HIGH | **Fixed** (adaptive cv; skip calibration when a class <2) | `enose/classifier/balanced_rf.py` `_build_model()` |
+| Calibration without independent groups | Evaluation | Disabled rather than replacing group CV with row CV | `enose/classifier/balanced_rf.py` `_fit_estimator()` |
 | Model Info UI stale after retrain | MED | **Fixed** (no-store fetches + `Cache-Control` + auto-refresh after train) | `enose/server/routes/ui.py`, `health.py` |
 | Hardcoded "Try coffee/air" buttons | LOW | **Fixed** (dynamic per-class via `/smell/class_examples`) | `ui.py`, `routes/smell.py` |
-| Client `.whl` unbuildable on Windows | MED | **Fixed** (dep split + prebuilt universal wheel) | `pyproject.toml`, `docs/CLIENT_WINDOWS_INSTALL.md` |
+| Native Windows dependency/GUI/USB behavior | Field | Universal wheel is available; native execution still requires validation | `docs/CLIENT_WINDOWS_INSTALL.md` |
 | `/predict/object` previously missing (404) | — | Fixed earlier | `enose/server/routes/vision.py` |
 | Grounding thresholds not calibrated (`τ_grounding`, `τ_commit`) | HIGH (field) | Open — defaults are placeholders | `enose/robot/policy.PolicyConfig` |
 | ROS2 adapters unimplemented | HIGH (real robot) | Open — Phase-0 | `enose/robot/ros2/{unitree_adapter,localization,pump}.py` |
@@ -180,3 +184,21 @@ from [GitHub Releases](https://github.com/Arcwy0/e-nose/releases/latest).
 
 Out of scope for the current round (Idea 2): `/smell/intensity`, `/smell/spatial_map`,
 plume tracers, fusion policy.
+
+## 8. Acquisition and deployment controls
+
+Read [PCB acquisition](PCB_ACQUISITION.md) for new-board units, firmware
+conversion, heater limits and legacy compatibility. New PCB is default;
+`--sensor-backend legacy` explicitly retains original ADC/RLOW behavior.
+Environmental UART is optional. Replay never actuates hardware.
+
+The [client reference](../enose/client/README.md#complete-cli-reference) lists
+all CLI options and menu 0–13, including configurable vision timeouts, preflight,
+external/client heating and headless recording. Browser heater state is read-only.
+Graceful cooldown is monitored, but USB/host loss cannot guarantee off.
+
+The UI stages candidates by default; active predictions change only after
+promotion. Historical merge is independently default-on. Follow the
+[deployment workflow](SERVER_CLIENT_GUIDE.md#training-and-candidate-deployment)
+and migrate active model/root history/candidate snapshots together.
+Keep one server worker and private authenticated/network access.

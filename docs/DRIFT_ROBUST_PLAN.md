@@ -1,5 +1,12 @@
 # Drift-robust smell classification: baseline-relative features + cross-session validation
 
+> Historical design proposal. Baseline-relative modes are implemented; current
+> UI/menu defaults and mandatory live identity checks differ from the original
+> opt-in proposal below. Use [MODEL_IMPROVEMENTS.md](MODEL_IMPROVEMENTS.md) and
+> [DRIFT_DATA_PROTOCOL.md](DRIFT_DATA_PROTOCOL.md) for current data/evaluation
+> guidance, and [SETUP.md](SETUP.md) for installation. No representation
+> guarantees drift invariance without independent experimental validation.
+
 ## Context
 
 The deployed smell classifier (`BalancedRFClassifier`) is trained on **absolute** resistance

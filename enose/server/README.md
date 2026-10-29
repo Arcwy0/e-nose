@@ -29,15 +29,15 @@ Windows PowerShell, full mode on an alternate port:
 
 ```powershell
 $env:ENOSE_NO_VLM = "0"
-python scripts/verify_server_environment.py --vlm
-python scripts/run_server.py --host 0.0.0.0 --port 8016
+uv run --active --no-project python scripts/verify_server_environment.py --vlm
+uv run --active --no-project enose-server --host 0.0.0.0 --port 8016
 ```
 
 For smell-only PowerShell use `$env:ENOSE_NO_VLM = "1"`. Change `--host` to
 `127.0.0.1` for local-only access. The default port is 8080; `--port 8016` uses
 `http://localhost:8016/ui`. Follow Uvicorn's listening-address line if the app
-banner still shows its fixed example address. Each server worker loads its
-own model, so keep the default single worker unless memory permits more.
+banner still shows its fixed example address. The launcher requires one worker:
+live buffers, baselines and deployment locks are process-local, regardless of RAM.
 
 The web UI is at **http://localhost:8080/ui**.  
 Interactive API docs are at **http://localhost:8080/docs**.
@@ -68,7 +68,9 @@ server/
 └── routes/
     ├── health.py    — GET /  /health  /smell/model_info
     ├── smell.py     — POST /smell/classify (now with OOD)  /smell/test_console  /smell/debug_input
-    ├── training.py  — POST /smell/online_learning  /smell/learn_from_csv  /training_pipeline
+    ├── training.py  — POST /smell/preview_csv  /smell/online_learning  /smell/learn_from_csv  /training_pipeline
+    ├── models.py    — candidate listing, independent paired evaluation, promotion and rollback
+    ├── vision.py    — serialized Florence inference in a threadpool
     ├── analytics.py — GET /smell/visualize_data  /smell/analyze_data  /smell/environmental_analysis  /smell/drift
     ├── live.py      — POST /sensor/live/push · GET /sensor/live/recent · /stats · DELETE /clear
     └── ui.py        — GET /ui  (browser interface, Classify/Train/Live/Model-Info tabs)
@@ -107,8 +109,15 @@ Use `state.require_classifier()` (raises 503 if None) or `state.require_fitted_c
 |---|---|
 | `ENOSE_NO_VLM=1` | Skip Florence-2, start with smell classifier only |
 | `ENOSE_CLASSIFIER` | Classifier backend: `balanced_rf` (default) or `xgb` |
+| `ENOSE_BASELINE_MODE`, `ENOSE_SNV` | Defaults for new classifier configs; saved models and explicit CSV settings take precedence |
 | `SERVER_HOST` | Override bind host (default `0.0.0.0`) |
 | `SERVER_PORT` | Override port (default `8080`) |
+
+All launcher options are `--host`, `--port`, `--reload`, `--workers` (must be
+`1`), and `--help`. `ENOSE_NO_VLM` is an environment setting, not a CLI flag.
+There is no server `--device` option; device selection is automatic.
+`.env` is not auto-loaded. Work from the repository/data root so relative
+model paths resolve; an installed wheel provides `enose-server`, not `scripts/`.
 
 ## Running in Docker
 
@@ -161,7 +170,18 @@ See [`docs/SERVER_CLIENT_GUIDE.md`](../../docs/SERVER_CLIENT_GUIDE.md) for the c
 
 | Schema | Used by | Fields |
 |---|---|---|
-| `SensorData` | `/smell/classify` | 22 float fields (R1–R17, T, H, CO2, H2S, CH2O) |
-| `ConsoleSensorData` | `/smell/test_console` | `values: str` (comma-separated) |
-| `OnlineLearningData` | `/smell/online_learning` | `sensor_data: list[dict]`, `labels: list[str]` |
-| `CSVLearningData` | `/smell/learn_from_csv` | `csv_data`, `target_column`, augmentation params, `merge_history` (default `true`) |
+| `SensorData` | `/smell/classify` | R1–R17, optional environmental defaults, optional `acquisition` and `session_id` |
+| `ConsoleSensorData` | `/smell/test_console` | `values` (17 or 22 comma-separated numbers), `resistance_unit` required for verified-unit models |
+| `OnlineLearningData` | `/smell/online_learning` | `sensor_data`, `labels`, optional acquisition/session/provenance |
+| `CSVLearningData` | `/smell/preview_csv`, `/smell/learn_from_csv` | CSV, label/units, profile/baseline, history/staging policy, plateau options, date/recording/session identity, row annotations |
+
+The browser/menu use plateau/logratio/no-augmentation/staging defaults; direct
+API defaults remain raw/no-baseline/augmentation/immediate update. Merging
+history remains on in both. Never infer that a staged training result is active.
+See [training and deployment](../../docs/SERVER_CLIENT_GUIDE.md#training-and-candidate-deployment)
+for request examples, paired evidence, overrides and snapshot limitations.
+
+Active state consists of the model **and** root `database_robodog.csv` history.
+Preserve `trained_models/candidates/` including rollback snapshots during
+migration. Model reload/promotion invalidates live baseline capture. Snapshot
+replacement is recoverable, not crash-atomic; joblib artifacts must be trusted.

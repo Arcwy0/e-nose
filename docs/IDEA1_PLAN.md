@@ -1,5 +1,12 @@
 # Vision + Smell + Robot Dog — Integration Plan
 
+> Historical robotics design, not current API/setup status or hardware
+> qualification. Later software implements the vision endpoints, PCB
+> acquisition, monitored heating and staged CSV deployment described in
+> [REPO_OVERVIEW.md](REPO_OVERVIEW.md). Use [SETUP.md](SETUP.md) and the
+> [client reference](../enose/client/README.md) for current operation.
+> Real-robot actuation and thermal safety require separate approved field tests.
+
 ## Context
 
 This document is the integration plan for adding robotics (Unitree Go-1 EDU) to the existing e-nose stack (FastAPI server + Python client). Two research outputs:

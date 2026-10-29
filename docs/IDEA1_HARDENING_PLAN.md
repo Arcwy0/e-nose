@@ -1,5 +1,11 @@
 # Idea 1 hardening: repo doc, UI fixes, small-batch retrain fix, client wheel
 
+> Historical design/proposal, not current installation instructions. Version
+> 3.3.0 includes later acquisition, safety, deployment and evaluation changes;
+> see [SETUP.md](SETUP.md), [PCB_ACQUISITION.md](PCB_ACQUISITION.md), and the
+> [client reference](../enose/client/README.md). Row-wise calibration proposals
+> here are superseded by group-disjoint, fold-local calibration.
+
 ## Context
 
 The e-nose + Go-1 + Florence-2 stack has Idea 1 (on-the-fly scent learning) essentially

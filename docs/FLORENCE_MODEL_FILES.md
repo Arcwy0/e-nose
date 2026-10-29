@@ -91,7 +91,7 @@ if not target.exists():
     lines = [m if isinstance(m, str) else " ".join(m) for m in merges]
     target.write_text("#version: 0.2\n" + "\n".join(lines) + "\n", encoding="utf-8")
 print("merges.txt is ready")
-'@ | python -
+'@ | uv run --active --no-project python -
 ```
 
 In Bash, run the same Python body between `python - <<'PY'` and a closing
@@ -124,11 +124,11 @@ This checks locked dependencies, runs real server startup, and generates a
 caption from an image. It may create the missing tokenizer text files but
 does not overwrite weights, datasets, or smell-classifier artifacts.
 
-Windows PowerShell:
+Windows PowerShell, active server uv environment:
 
 ```powershell
 $env:ENOSE_NO_VLM = "0"
-python scripts/run_server.py --host 0.0.0.0 --port 8016
+uv run --active --no-project enose-server --host 0.0.0.0 --port 8016
 ```
 
 Bash:
@@ -154,8 +154,9 @@ prompts, or CPU/CUDA device is not the remedy for that parser failure.
 
 The camera client also unwraps the `/predict/object` response's `result` field
 and draws polygon regions as well as boxes. Update both server and client;
-rebuild the Docker image when running the server in Docker. Dependency pins
-and model weights have not changed.
+restart a bind-mounted Docker server after updating source. Rebuild custom
+images that copy source. These detection fixes do not change dependency pins
+or model weights. The current release 3.3.0 retains them.
 
 A successful caption-only startup check does not test localization-token
 parsing. Check object detection on a visible bottle with `bottle` or `vial`.
@@ -167,6 +168,10 @@ contents cannot be verified from its appearance. Use visual container labels
 for localization, and confirmed sample identity or olfactory measurements for
 chemical labels. CPU latency depends on the PC; a timeout is distinct from
 an HTTP 200 response containing empty parsed regions.
+
+Client deadlines are configurable: `--vision-timeout` (30 s by default) and
+`--scene-timeout` (60 s). Initial CPU tests can use 180/300 s; these are budgets,
+not measured latency promises. See the [client reference](../enose/client/README.md).
 
 ## GitHub and offline copies
 

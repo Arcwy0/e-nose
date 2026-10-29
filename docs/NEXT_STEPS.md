@@ -1,5 +1,13 @@
 # What to do next
 
+> Roadmap context: several sections below predate release 3.3.0. Current
+> setup/CLI guidance is in [SETUP.md](SETUP.md) and the
+> [client reference](../enose/client/README.md). PCB acquisition, monitored
+> heating, CSV preview/staging and group-isolated evaluation are implemented;
+> physical thermal/USB behavior, native Windows and independent chemical
+> accuracy still need field validation. The supplied firmware has no documented
+> host-loss watchdog: guaranteed heater-off requires firmware/interlock work.
+
 Companion to [`IDEA1_PROGRESS.md`](IDEA1_PROGRESS.md). The software-only path of Idea 1 is complete; what's left is everything that needs your hardware in the room and the longer Idea-2 research arc.
 
 Sections are ordered roughly by *what unblocks what*. The Idea-1 deadline-critical work is §§1–4. Idea-2 starts at §6.
@@ -27,9 +35,13 @@ What to do:
 
 ---
 
-## 2. Server-side fix for the small-batch retrain quirk *(1 day)*
+## 2. Small-batch retrain quirk — historical proposal, superseded
 
-The `BalancedRFClassifier`'s `CalibratedClassifierCV` (default `cv=5`) chokes when a tiny new-class batch lands a CV fold with one class only, raising `ValueError: The target 'y' needs to have more than 1 class`. The policy already catches this and moves on, but it costs you a commit per mission.
+Earlier code failed on small-class row-wise calibration folds. The current
+path uses group-disjoint calibration with fold-local preprocessing and disables
+calibration if independent groups are insufficient. Holdout accuracy is null
+when a complete independent split cannot be formed. Do not implement either
+old row-CV proposal below as a replacement for these guards.
 
 Two fixes, pick one:
 

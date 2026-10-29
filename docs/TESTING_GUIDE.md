@@ -1,5 +1,44 @@
 # Testing Guide — from Docker to the Robot Dog
 
+## Current 3.3.0 checks before field testing
+
+Use [SETUP.md](SETUP.md) for installation and
+[CLIENT_QUICKSTART.md](CLIENT_QUICKSTART.md) for current commands. This guide
+also retains earlier robot/simulation scenarios; their old output excerpts
+are historical evidence, not a fresh release qualification or accuracy claim.
+
+1. In an isolated no-device environment, run client/server `--help`, the source
+   smoke test and focused tests. No VLM, USB or robot access is needed for the
+   software suite. Use a disposable working directory: routes write relative
+   model/history files, so do not test against the production artifact pair.
+2. Preview an unlabelled supplier Rs CSV: expect traces, no invented classes
+   and training refused until labels/verified row annotations are provided.
+3. Stage a labelled candidate: verify the active model **and** root history
+   remain unchanged. Check null metrics when no independent holdout is possible.
+4. Compare on independently collected labelled data, promote explicitly and
+   verify rollback of the pair. A missing/unevaluated comparison requires an
+   explicit override; a synthetic result is not chemical-recognition accuracy.
+5. Test recorded CSV/NPZ replay without hardware, including actual resistance
+   units, fault-row rejection, date/session metadata and R-only input.
+6. Only after physical-test approval, run preflight on the correct backend.
+   Legacy must never receive INFO/STATUS or binary heater commands. PCB
+   preflight does not enable heat, but disconnect still requests heater-off.
+7. Field-check calibrated PI feedback, safe shutdown, observed sample rate,
+   recording during slow HTTP, new-session baseline invalidation and native
+   Windows behavior. No software-only test certifies physical thermal safety.
+
+Heater default is `external`; explicit client heating uses configurable
+300°C target/350°C host trip, not certified safe limits. Graceful shutdown
+requests controlled ramp-down and verifies fresh zero duty. USB/host loss,
+SIGKILL and power failure cannot guarantee off without firmware protection.
+See [PCB_ACQUISITION.md](PCB_ACQUISITION.md) before connecting hardware and
+[client options](../enose/client/README.md#complete-cli-reference).
+
+For an explicitly CPU-isolated container, use `--runtime runc`,
+`NVIDIA_VISIBLE_DEVICES=void`, `CUDA_VISIBLE_DEVICES=`, no GPU/device mounts,
+and no USB/robot access. Omitting `--gpus` alone may leave GPUs visible through
+the host's default NVIDIA runtime. Never mix live deployment files with test output.
+
 This guide walks through every check that's actually possible *with what the codebase currently implements*. Stages skipped: anything that depends on Jetson-side ROS2 adapters (`enose.robot.ros2.*` is still a skeleton; see [`NEXT_STEPS.md`](NEXT_STEPS.md) §3) and Idea-2 plume tracing.
 
 Companion docs:
@@ -15,7 +54,7 @@ Companion docs:
 
 | Item | Why | Where |
 |---|---|---|
-| Linux host with Docker + NVIDIA Container Toolkit | server image needs GPU | lab GPU box |
+| Linux host with Docker; NVIDIA Container Toolkit for GPU mode only | CPU smell-only/VLM checks are also supported | lab server |
 | Florence-2-Large weights | VLM grounding | `model/Florence-2-Large/` (already on disk) |
 | `enose-net` Docker network | server ↔ client comms | `docker network create enose-net` if missing |
 | Repo clone at `/home/vlm-workspace/e-nose` (or wherever) | source code | git or rsync |
@@ -64,7 +103,8 @@ The source-only `smoke_test.py` checks syntax/exports, not VLM compatibility.
 Dependency alignment was verified on Linux with real model startup and caption
 generation in pip and uv environments on CPU/GPU, and in the rebuilt Docker
 image with FlashAttention 2.7.3. All 82 shared locked runtime versions matched,
-and the complete test suite passed (33 tests). Windows/Linux binary-wheel
+and the then-current test suite passed (33 tests; historical parity run, not
+the current suite size). Windows/Linux binary-wheel
 resolution was checked for Python 3.10, 3.11, and 3.12; actual native Windows
 execution remains a colleague-side check.
 
@@ -231,7 +271,11 @@ A clean transition log, e.g.:
 ```
 
 * `lemon` is *expected* to be skipped — its world_pose is 8 m away and beyond the `detection_radius`. That tests the `no detection above tau_grounding` branch.
-* You may see "online_learning failed" on one of the two new-class commits — that's a pre-existing classifier-side quirk (`BalancedRFClassifier`'s calibration CV chokes on tiny batches). The policy correctly catches it, marks the target as skipped, and moves on. Fix lives in [`NEXT_STEPS.md`](NEXT_STEPS.md) §2.
+* Earlier runs showed a small-batch calibration failure. Current calibration
+  requires independent groups and disables itself when they are insufficient.
+  If online learning fails now, inspect its returned error: missing live
+  baseline, incompatible units or unstable/invalid capture are intentional
+  rejection paths, not permission to bypass the safeguards.
 
 ### 3.3 Check the provenance side-effects
 
@@ -440,9 +484,11 @@ pip install -e .
 pip install numpy pandas requests pyserial opencv-python-headless matplotlib pillow
 ```
 
-### 6.4 Serial ports for the e-nose
+### 6.4 Serial ports for the e-nose (approved physical testing only)
 
-The e-nose ships data on two UART devices. Identify them:
+New PCB uses one USB CDC port by default. The legacy board must be selected
+explicitly; a separate environmental UART is optional for either board.
+Identify devices without starting heating:
 
 ```bash
 ls /dev/ttyUSB*    # or /dev/ttyACM*
@@ -455,14 +501,12 @@ Grant access:
 sudo usermod -aG dialout $USER  # then log out / back in
 ```
 
-Quick sanity read:
+Backend-aware preflight (requests off on PCB exit; never enables heat):
 
 ```bash
-python3 - <<'EOF'
-from enose.client.sensors import ENoseSensor
-s = ENoseSensor(port=('/dev/ttyUSB0', '/dev/ttyUSB1'))
-print(s.read_single_measurement())   # expect a 22-key dict
-EOF
+enose-client --port_enose /dev/ttyACM0 --preflight --diagnostic-report outputs/pcb-preflight-01.json --server http://LAB_SERVER:18080
+# Legacy alternative: no binary INFO/STATUS, legacy experiment's RLOW
+enose-client --sensor-backend legacy --port_enose /dev/ttyUSB0 --rlow 0.1 --preflight --server http://LAB_SERVER:18080
 ```
 
 If you get junk or zeros, double-check baud rates and that the device isn't held by another process.
@@ -498,7 +542,7 @@ This is the single most important real-robot test you can run today. It verifies
 # On the Jetson:
 cd ~/e-nose
 python3 scripts/run_client.py \
-    --port_enose /dev/ttyUSB0 --port_UART /dev/ttyUSB1 \
+    --sensor-backend legacy --port_enose /dev/ttyUSB0 --port_UART /dev/ttyUSB1 \
     --server http://<lab-gpu-ip>:18080 \
     --live --live-classify \
     --record-session runs/teleop_$(date +%Y%m%d_%H%M%S).npz
@@ -642,7 +686,7 @@ You should see your hand-fed entry plus the source image.
 | `enose-server` not found | Image was pruned | Rebuild: `docker build -t enose-server -f docker/Dockerfile-cu124 .` |
 | `models.vlm: false` after starting with GPU | Florence-2 load failed | `docker logs enose-srv \| grep Florence-2` — usually a corrupted `model/Florence-2-Large/` |
 | `/predict/scene` returns empty `detections` | Florence-2 doesn't see the labels in this image | Try `/predict/object` with single label; tune `τ_grounding` ([`NEXT_STEPS.md`](NEXT_STEPS.md) §1) |
-| `[mission] online_learning failed` for one of two new-class commits | `BalancedRFClassifier` calibration CV quirk | Known issue, [`NEXT_STEPS.md`](NEXT_STEPS.md) §2 |
+| `[mission] online_learning failed` | Inspect returned validation/baseline/unit/capture error | Current guards in `routes/training.py`; do not assume historical calibration bug |
 | `[mission] settle timeout — recording anyway` every time | Sensor never stabilizes; thresholds too tight, or pump isn't on | Increase `--settling-threshold` to 0.05, or flip the physical pump on |
 | Live tab empty in the browser UI | Push failures from the client | Check `pub.last_error`, Wi-Fi, server URL |
 | `ros2 backend not ready` from `run_robot_trainer.py` | ROS2 adapters not implemented yet | Expected. See [`NEXT_STEPS.md`](NEXT_STEPS.md) §3 |

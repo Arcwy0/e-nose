@@ -1,5 +1,12 @@
 # Idea 1 — Implementation Progress
 
+> Historical first-integration log, not the current setup or release status.
+> Later work includes PCB acquisition/heater monitoring, preview/annotations,
+> candidate deployment and group-isolated calibration/validation. Use
+> [SETUP.md](SETUP.md), [PCB_ACQUISITION.md](PCB_ACQUISITION.md), and the
+> [client options](../enose/client/README.md) for 3.3.0 behavior. Historical
+> calibration failures below do not describe the current fitting path.
+
 This document records what was implemented in the first integration session, file by file, with the verification evidence for each piece. Companion docs:
 
 * [`IDEA1_PLAN.md`](IDEA1_PLAN.md) — the design plan this work executes against.

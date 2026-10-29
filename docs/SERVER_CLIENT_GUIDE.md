@@ -1,535 +1,262 @@
-# Server + Client Integration Guide
+# Server + client integration guide (3.3.0)
 
-## Overview
+The server runs Florence-2 and the smell classifier; the acquisition client
+owns USB, camera and heater monitoring. They communicate over HTTP. A server
+restart cannot switch off a heater attached to another PC.
 
-The system has two independent parts that communicate over HTTP:
+## Installation and entry points
 
-- **Server** (`enose/server/`) — FastAPI app running Florence-2 VLM + smell classifier. Runs on the GPU machine or in Docker.
-- **Client** (`enose/client/`) — Python CLI that reads from physical sensors and drives the server. Runs on the robot laptop.
+Use [SETUP.md](SETUP.md) for the shared **server runtime lock**, pinned Florence
+snapshot and CPU/CUDA setup. Use [CLIENT_QUICKSTART.md](CLIENT_QUICKSTART.md)
+for a separate lightweight client environment. Do not mix native client OpenCV
+with the server's headless OpenCV environment.
 
----
+| Installation | Server | Client | NPZ replay |
+|---|---|---|---|
+| Installed wheel or editable package | `enose-server` | `enose-client` | `python -m enose.client.replay` |
+| Installed repository checkout | `python scripts/run_server.py` | `python scripts/run_client.py` | `python scripts/replay.py` |
 
-## Running the server
+The wheel does not include repository `scripts/`. Docker server/client images
+expect a source mount rather than an installed checkout baked into the image.
 
-Install the complete runtime lock with `pip install -r requirements-server.txt`
-or `uv pip sync --python .venv requirements-server.txt`, then register the
-package using `pip install --no-deps -e .` (or the uv equivalent). This is the
-same pinned runtime Docker installs. See [`SETUP.md`](SETUP.md) for Windows,
-Linux FlashAttention, and `verify_server_environment.py --vlm` instructions.
+## Server launch options
 
-### Classifier-only mode (no GPU, no VLM)
-
-Use `ENOSE_NO_VLM=1` to skip loading Florence-2. All smell endpoints work normally. Vision endpoints return HTTP 503.
-
-```bash
-ENOSE_NO_VLM=1 python scripts/run_server.py
-```
-
-Windows PowerShell, on a different port:
-
-```powershell
-$env:ENOSE_NO_VLM = "1"
-python scripts/run_server.py --host 0.0.0.0 --port 8016
-```
-
-### Full mode (VLM + classifier)
+Bash, from the installed server environment or server container:
 
 ```bash
-unset ENOSE_NO_VLM
+# Smell only; vision endpoints return 503
+ENOSE_NO_VLM=1 enose-server --host 127.0.0.1 --port 8016
+
+# Full server; checkout verifier loads real weights and generates a caption
 python scripts/verify_server_environment.py --vlm
-python scripts/run_server.py
-# Optional flags:
-#   --host 0.0.0.0      (default)
-#   --port 8080         (default)
-#   --reload            (dev auto-reload)
-#   --workers 1         (default; each additional worker loads another VLM)
+ENOSE_NO_VLM=0 enose-server --host 0.0.0.0 --port 8016
 ```
 
-Windows PowerShell:
+Windows PowerShell, active server uv environment:
 
 ```powershell
 $env:ENOSE_NO_VLM = "0"
-python scripts/verify_server_environment.py --vlm
-python scripts/run_server.py --host 0.0.0.0 --port 8016
+uv run --active --no-project python scripts/verify_server_environment.py --vlm --device cpu
+uv run --active --no-project enose-server --host 127.0.0.1 --port 8016
 ```
 
-The default UI is `http://localhost:8080/ui`; with the PowerShell examples it is
-`http://localhost:8016/ui`. `127.0.0.1` binds only locally; `0.0.0.0` listens on
-all interfaces. Remote clients use the server PC's actual IP and port. A Windows
-10048 error means the requested port is occupied: choose another `--port`.
-The application's ready banner has a fixed example address; use Uvicorn's
-listening-address line for the actual host/port.
+Set `$env:ENOSE_NO_VLM = "1"` for smell-only mode. `--device cpu` belongs to
+the verifier, not the server launcher; startup auto-selects CPU when no CUDA
+GPU is available. CPU inference uses host RAM and may need longer client
+request deadlines. Full startup failure aborts the server rather than silently
+pretending vision is available.
 
-Florence-2 weights must be in `model/Florence-2-Large/` (set `VLM_MODEL_PATH` in `enose/config.py` to change).
+| Server flag | Default | Effect |
+|---|---|---|
+| `--host` | `SERVER_HOST`, otherwise `0.0.0.0` | Bind address; `127.0.0.1` is local-only |
+| `--port` | `SERVER_PORT`, otherwise `8080` | Listen port; choose another for occupied-port errors |
+| `--reload` | off | Development reload; resets live state and reloads models |
+| `--workers` | `1` | Must remain 1: buffers, baselines and deployment locks are process-local |
+| `-h`, `--help` | — | Print launcher help |
 
-### Via uvicorn directly
+The browser is at `http://localhost:8016/ui` for these examples. Remote clients
+use the server's actual IP, not `0.0.0.0`. The server API has no built-in
+authentication: use a trusted private network/VPN/authenticated proxy. Do not
+publish write/training/deployment routes on an unauthenticated public tunnel.
 
-```bash
-ENOSE_NO_VLM=1 uvicorn enose.server.app:app --host 0.0.0.0 --port 8080
-```
+### Environment and paths
 
----
+| Setting | Default | Scope |
+|---|---|---|
+| `ENOSE_NO_VLM` | `0` | `1` skips Florence |
+| `ENOSE_CLASSIFIER` | `balanced_rf` | Startup loader backend; `xgb` selects XGBTabularClassifier |
+| `ENOSE_BASELINE_MODE`, `ENOSE_SNV` | `none`, off | Defaults for new classifier config only; saved model/explicit CSV settings take precedence |
+| `SERVER_HOST`, `SERVER_PORT` | `0.0.0.0`, `8080` | Launcher defaults overridden by flags |
+| `ENOSE_RLOW` | `1.0` | Legacy **client**, not a server-side rescaling control |
+| `ENOSE_VISION_TIMEOUT`, `ENOSE_SCENE_TIMEOUT` | `30`, `60` | Client HTTP deadlines, seconds |
 
-## Running the client
+`.env` is not auto-loaded. Export variables in the process or pass Docker
+`--env-file`. Paths below come from `enose/config.py`, relative to the process
+working directory; they are not currently server CLI flags:
 
-### Offline / simulated mode — no hardware required
-
-```bash
-python scripts/run_client.py --offline --server http://localhost:8080
-```
-
-All sensor readings are generated synthetically using smell profiles defined in `enose/client/sensors.py`. The full menu works: train, classify, CSV import, manual testing.
-
-### Hardware mode
-
-```bash
-# Linux
-python scripts/run_client.py \
-    --port_enose /dev/ttyUSB0 \
-    --port_UART  /dev/ttyUSB1 \
-    --server     http://SERVER_IP:8080 \
-    --time       60 \
-    --samples    100
-
-# Windows
-python scripts/run_client.py \
-    --port_enose COM3 \
-    --port_UART  COM4 \
-    --server     http://SERVER_IP:8080
-```
-
-The client discovers serial ports interactively if `--port_enose` / `--port_UART` are omitted. Typical Linux device names are `/dev/ttyUSB0`, `/dev/ttyUSB1`, `/dev/ttyACM0`; on macOS `/dev/tty.usbserial-XXXX`; on Windows `COM3`, `COM4`, etc. Run `ls /dev/tty*` (Linux/macOS) or check Device Manager → Ports (Windows) to confirm.
-
-If you see `permission denied` opening the serial device on Linux, add your user to the `dialout` group once and re-log:
-
-```bash
-sudo usermod -aG dialout $USER
-# log out and back in
-```
-
-### Live streaming from the client
-
-The client can publish samples to the server in real time so anyone with
-the UI open sees the live charts update. This replaces the older "record,
-upload, classify" flow for ad-hoc experiments.
-
-```bash
-# Stream synthetic samples, classify each one, tag them as "coffee",
-# and save a .npz for later replay.
-python scripts/run_client.py --offline \
-    --live --live-classify --live-label coffee \
-    --record-session runs/coffee_2026-04-23.npz \
-    --server http://localhost:8080
-```
-
-New flags:
-
-| Flag | Purpose |
+| Path | Purpose |
 |---|---|
-| `--live` | Skip the menu; go straight to the live dashboard. |
-| `--live-rate` (default `5.0`) | Publisher rate in Hz. The server buffer is sized so 1000 / rate ≈ minutes of history. |
-| `--live-window` (default `60.0`) | Seconds visible in the client-side matplotlib window. |
-| `--live-baseline` | Subtract the first few seconds as an "air" baseline (sensor-drift compensation on the plot only — not sent to the server). |
-| `--live-classify` | Classify every sample through `/smell/classify` and show confidence on the bottom axis. |
-| `--live-label coffee` | Tag each published sample with this label so the server can separate runs in the ring buffer. |
-| `--record-session path.npz` | Tee the sample stream into a `.npz` file while publishing. Works with `--live` or menu option 8. |
+| `model/Florence-2-Large/` | Separate Florence snapshot; one-time tokenizer recovery needs write access |
+| `trained_models/smell_classifier_sgd_latest.joblib` | Active smell model |
+| `database_robodog.csv` | Active canonical training history; preserve with the model |
+| `trained_models/candidates/<id>/` | Candidate model/history/manifest |
+| `trained_models/candidates/rollbacks/<id>/` | Recoverable deployment snapshots |
 
-For a baseline-relative model, first let the client fill at least one stable
-minute of clean-air data, then click **Set clean-air baseline** in the server
-UI. Per-frame `--live-classify` results are intentionally withheld after a
-server restart until this has been done; a training-time baseline is not a safe
-substitute for today's physical sensor baseline.
+Rollback manifests bind absolute target paths. After migration to a different
+working directory, old snapshots are archival; do not edit manifests to bypass
+target checks. Make new snapshots in the new location.
 
-The same baseline is required before Idea-1 online learning with a
-baseline-relative model. The server compresses each confirmed capture to at
-most five stable, zero-aware median windows and stores an exposure/session ID.
-It rejects strongly changing chunks instead of permanently adding a transient
-to model history. The client still saves all raw frames locally for temporal
-research and audit.
+### Docker server
 
-### Replaying a recorded session
-
-`scripts/replay.py` reads a `.npz` from `--record-session` and re-plays
-every sample through `/smell/classify`, reporting:
-
-- Label distribution and majority fraction
-- Confidence: mean, median, p10, p90
-- Accuracy vs. `session_label` (if the session was recorded with a tag)
-- Agreement with the predictions originally recorded at capture time
+Bash, repository root; source, weights and runtime state stay on the host:
 
 ```bash
-python scripts/replay.py runs/coffee_2026-04-23.npz \
-    --server http://localhost:8080 \
-    --rate 10            # classifications per second, 0 = as fast as possible
-    --limit 500          # cap total samples
-    --verbose            # print each sample's result
+docker build -t enose-server -f docker/Dockerfile-cu124 .
+docker run --rm --name enose-server-run --gpus all -p 8016:8080 --mount type=bind,source="$PWD",target=/workspace/repo --workdir /workspace/repo -e PYTHONPATH=/workspace/repo -e ENOSE_NO_VLM=0 enose-server python scripts/run_server.py --workers 1
 ```
 
-Use case: after retraining, re-run a known-good session to confirm the
-new model still predicts the expected label on captured data — no
-re-measurement needed.
+For CPU-only execution omit `--gpus all`, use `--runtime runc`, and add
+`-e NVIDIA_VISIBLE_DEVICES=void -e CUDA_VISIBLE_DEVICES=`. Set
+`ENOSE_NO_VLM=1` for smell-only CPU mode; leave it `0` to test Florence on CPU.
+Omitting `--gpus` alone may not isolate a host with an NVIDIA default runtime.
+Do not grant the server USB/robot devices; acquisition belongs to the client.
+Keep persistent files mounted before removing/replacing a container.
 
----
+## Client launch and physical ownership
 
-## Remote access (LAN / private tunnel)
-
-If colleagues need to drive the server from off-host, bind the server to
-`0.0.0.0` (the default) and reach it at `http://<LAN-IP>:8080`. For
-off-site access, put a VPN (WireGuard, Tailscale, etc.) or a private TCP
-tunnel in front of it — the repo is deliberately tunnel-agnostic, since
-every deployment picks something different.
-
-The client side is identical to a local run: only `--server` changes.
-The browser UI uses relative paths for every `fetch()` call, so it works
-identically behind any reverse proxy or TCP forwarder. The status bar
-shows the origin URL the page was loaded from, so users can always
-confirm which instance they are talking to.
-
-### Docker client with UART pass-through
-
-Colleagues who want a reproducible Python environment can run the client
-from the provided Docker image. The only hardware-specific part is
-passing the USB serial device into the container.
+See the [complete flag/menu reference](../enose/client/README.md#complete-cli-reference).
+New PCB is default, firmware-calibrated ohms at 250000 baud. Original hardware
+requires `--sensor-backend legacy`, usually 9600 baud and experiment-specific
+RLOW. Both can omit `--port_UART` for resistance-only operation.
 
 ```bash
-git clone <repo-url> e-nose && cd e-nose
-docker build -t enose-client -f docker/Dockerfile-client .
+# No serial/heater commands
+enose-client --offline --server http://SERVER:8016
 
-# Offline (verify connectivity first)
-docker run --rm -it \
-  -v "$(pwd)":/app -e PYTHONPATH=/app \
-  enose-client \
-  python scripts/run_client.py --offline --server http://<SERVER_HOST>:8080
+# New PCB with local recording and browser-only display
+enose-client --port_enose /dev/ttyACM0 --live --headless --live-classify --record-session outputs/session-01.npz --server http://SERVER:8016
 
-# Hardware — map both UART devices into the container
-docker run --rm -it \
-  --device=/dev/ttyUSB0 --device=/dev/ttyUSB1 \
-  -v "$(pwd)":/app -e PYTHONPATH=/app \
-  enose-client \
-  python scripts/run_client.py \
-      --port_enose /dev/ttyUSB0 --port_UART /dev/ttyUSB1 \
-      --server http://<SERVER_HOST>:8080
+# Original board, no environmental UART
+enose-client --sensor-backend legacy --port_enose /dev/ttyUSB0 --rlow 0.1 --server http://SERVER:8016
 ```
 
-Notes:
-- `--device` grants direct access to host serial nodes — no `--privileged` needed.
-- `Dockerfile-client` is headless — menu options that need the webcam
-  (1 — full training cycle, 2 — vision only) won't work inside it unless
-  you also pass `--device=/dev/video0` and wire up display forwarding.
-  Usually not worth it; use menu **3** (smell identification) or **6**
-  (manual 22-feature input) when driving a remote server from Docker.
-- Windows/macOS cannot pass USB serial into a Linux container directly.
-  On those hosts run the client **outside** Docker.
+On Windows run through `uv run --active --no-project` and use COM port names.
+The client connects the selected sensor before opening its menu; use
+`--offline` for remote CSV/model/manual work without hardware.
 
-### Quick troubleshooting
+`--heater-control external` is default: preserve supplier PI settings, no
+automatic enable/setpoint write. Close the supplier tool before our client
+opens the port. Explicit client heating uses `--heater-control client` with
+configurable 300°C target and 350°C **host** trip threshold. This threshold is
+not a certified safe temperature. Both modes request disable on exit and verify
+fresh disabled/zero-duty state. Graceful signals are handled, but no host-loss
+watchdog is documented; USB loss/forced kill/host failure cannot guarantee off.
+See [PCB acquisition and safety](PCB_ACQUISITION.md). The server/browser cannot
+enable heating. Legacy/replay never receive heater or binary status commands.
 
-| Symptom | Likely cause / fix |
-|---|---|
-| Client can't reach `/health` | Server not running, wrong URL, or firewall blocking the port. Confirm with `curl -v http://<SERVER_HOST>:8080/health` from the client host. |
-| Client reaches `/health` but training is slow | Expected for large CSV uploads over a slow link. For very large datasets, keep training local to the server host. |
-| `permission denied: /dev/ttyUSB0` inside Docker client | Either `--device=/dev/ttyUSB0` is missing from the `docker run`, or host-side permissions block the container user. Easiest fix: `sudo chmod 666 /dev/ttyUSB0` for one session. |
+Preflight (`--preflight --diagnostic-report outputs/preflight-01.json`) checks
+acquisition and model compatibility without camera/VLM inference. It does not
+enable heating; PCB disconnect still requests off. JSON reports refuse overwrite.
 
----
+## Live inference and recording
 
-## Testing without hardware — all options
+Acquisition callbacks record canonical local readings before HTTP. A separate
+bounded latest-sample queue publishes to `/sensor/live/push`. Slow requests
+may skip publication/predictions, not block local sampling. Polling at 5 Hz
+does not mean every 10 Hz MCU frame is retained. `--prediction-confirmations 2`
+adds repeated-label confirmation locally, not a new server accuracy estimate.
 
-### Option 1: Browser UI
+The transport uses R1–R17 plus optional environmental channels. Without an env
+UART, default room values are marked unmeasured; 17-feature models ignore them.
+PCB `temp_actual_c`, duty and fault flags are diagnostics, never ambient `T`.
+Verified units must match across sample/model/history. Canonical R CSV values
+are not rescaled just because an API unit was selected.
 
-```
-http://localhost:8080/ui
-```
+For baseline-relative models:
 
-- Paste 22 values → Classify
-- Upload/paste CSV → Train
-- No Python, no terminal
+1. Stream stable clean air from the actual board/session.
+2. Capture **Live → Set clean-air baseline**; local `--live-baseline` only
+   changes the plot and is not this operation.
+3. Approach the analyte and use fast provisional or strict stable-window inference.
+4. Check recovery before the next exposure. Reconnects, changed acquisition
+   identity/session and deployment/server reloads require a fresh baseline.
 
-### Option 2: Swagger / ReDoc
+Local NPZ saves acquisition/units, network latency and confirmation metadata
+without pickle. `--live-label` tags data but does not train. Reclassify via
+menu 9 or `python -m enose.client.replay session.npz --server http://SERVER:8016`.
+Supplier CSV sensor playback instead uses `--sensor-backend replay --sensor-csv`;
+it never establishes smell labels or measured physical-board identity.
 
-```
-http://localhost:8080/docs    ← interactive
-http://localhost:8080/redoc   ← readable
-```
+## Training and candidate deployment
 
-### Option 3: curl (single sample)
+### UI/menu defaults versus API defaults
 
-```bash
-# Classify by name
-curl -X POST http://localhost:8080/smell/classify \
-  -H "Content-Type: application/json" \
-  -d '{"R1":15.2,"R2":8.3,"R3":12.1,"R4":3.4,"R5":18.9,"R6":11.2,"R7":9.8,"R8":6.7,"R9":14.3,"R10":10.5,"R11":13.2,"R12":7.8,"R13":5.6,"R14":12.4,"R15":8.9,"R16":6.3,"R17":11.7,"T":21.0,"H":49.0,"CO2":400,"H2S":0.0,"CH2O":5.0}'
+| Setting | Browser Train / client menu 5 | Direct CSV API default |
+|---|---|---|
+| Data profile | Stable plateaus | Raw rows |
+| Backend | Balanced RF | Balanced RF |
+| Baseline | Log ratio | None |
+| Augmentation | Off | On, 5 copies |
+| SNV | Off | Off |
+| Merge history | On | On |
+| Stage candidate | On | Off: immediate update |
 
-# Classify by position (comma-separated, R1…R17, T, H, CO2, H2S, CH2O)
-curl -X POST http://localhost:8080/smell/test_console \
-  -H "Content-Type: application/json" \
-  -d '{"values": "15.2,8.3,12.1,3.4,18.9,11.2,9.8,6.7,14.3,10.5,13.2,7.8,5.6,12.4,8.9,6.3,11.7,21.0,49.0,400,0.0,5.0"}'
-```
+These API defaults preserve old callers; request recommended settings explicitly.
+History policy and deployment policy are independent. `merge_history=false`
+trains on this upload only; with staging enabled it does **not** replace the
+active pair until promotion. Online Idea 1 updates retain historical learning.
 
-### Option 4: Batch CSV training
+Browser workflow:
 
-```bash
-jq -n --rawfile csv your_data.csv '{
-  csv_data: $csv,
-  target_column: "Gas name",
-  training_profile: "plateau",
-  classifier_backend: "balanced_rf",
-  baseline_mode: "logratio",
-  use_augmentation: false,
-  n_augmentations: 0
-}' | curl -X POST http://localhost:8080/smell/learn_from_csv \
-  -H "Content-Type: application/json" --data-binary @-
-```
+1. Upload CSV, select units, recording date/session/recording identity and label column.
+   R1–R17 suffice; supplier `rs_ch0_ohm`…`rs_ch16_ohm` are converted once.
+2. Supply verified labels or source-row annotations. Rows are zero-based,
+   header excluded, `[start_row,end_row)`. Unlabelled gaps are not classes.
+3. Preview traces, retained/rejected windows and reasons before fitting. Unlabelled
+   preview works; unlabelled training does not. Heater temperature is diagnostic only.
+4. Train a candidate. The active model/history remains unchanged.
+5. In Model Info, upload a separately collected labelled CSV and explicitly confirm
+   independence. Evaluate both models on exactly the same rows.
+6. Promote explicitly and retain the rollback ID. First deployment or unavailable
+   evidence requires an explicit unevaluated override, not an accuracy claim.
 
-The plateau profile requires timestamps and R1–R17, but not environmental
-sensors. It retains stable pre-exposure air and late analyte windows and drops
-the transitions. See [`MODEL_IMPROVEMENTS.md`](MODEL_IMPROVEMENTS.md).
+Exact R+label overlap with either history is rejected. The operator must still
+establish exposure/day independence; overlap screening cannot prove it.
+Paired evaluation uses persisted training-baseline fallbacks, not test-label
+baseline adaptation or the active live baseline. Evidence is bound to hashes of
+both persisted model/history pairs; retraining invalidates stale comparisons.
+Known regression needs a separate explicit override.
 
-### Option 5: Offline client menu
+Within a fit, group-disjoint holdout and calibration keep exposures separate;
+learned preprocessing is fit only on training folds. If no class-complete group
+split exists, accuracy is null (`not_estimable`), not a row-wise fallback.
+Final fitting happens after holdout diagnostics are frozen. Different fits'
+training scores are not a paired comparison or proof of improvement.
 
-```bash
-python scripts/run_client.py --offline
-# Menu option 6 → Manual 22-feature input testing
-# Menu option 5 → Learn from CSV file
-```
-
----
+Promotion snapshots the old pair; rollback restores it. Two-file replacement
+is recoverable, **not crash-atomic**. Keep one worker and back up the model,
+root history and candidate/snapshot tree together. Load only trusted joblib
+files; they are executable Python serialization, not an untrusted upload format.
 
 ## API reference
 
-### Smell classification
+Use the running server's `/docs` for full current request schemas. Selected routes:
 
-```
-POST /smell/classify
-Body: {"R1": float, "R2": float, ..., "T": float, "H": float, "CO2": float, "H2S": float, "CH2O": float}
-Returns: {
-  predicted_smell, probabilities, confidence, features_used,
-  ood: {
-    available: bool,
-    score: float,                  # mean |z| across features
-    min_centroid_L2: float,        # L2 to the nearest class centroid
-    nearest_centroid_L2: float,    # same value, kept for legacy consumers
-    status: "ok" | "warn" | "out",
-    thresholds: {ood_warn, ood_out, centroid_warn, centroid_out}
-  }
-}
-```
-
-The `ood` block is a best-effort addition — if diagnostics fail for any
-reason (missing centroids on an un-fit model, numerical issues, etc.) the
-response still carries the prediction and `ood.available = false`. The
-status enum uses the same thresholds as the classifier's internal
-`predict_with_ood`, so the browser traffic light and the confidence-damping
-path agree on what "OOD" means.
-
-Status rules:
-
-| Condition | Status |
-|---|---|
-| `score > 3.0` OR `min_centroid_L2 > 5.0` | `out` (red) |
-| `score > 2.0` OR `min_centroid_L2 > 3.5` | `warn` (yellow) |
-| otherwise | `ok` (green) |
-
-```
-POST /smell/test_console
-Body: {"values": "v1,v2,...,v22"}   ← comma-separated, R1–R17 then T,H,CO2,H2S,CH2O
-Returns: {predicted_smell, confidence, all_probabilities, sorted_probabilities, ood: {...}}
-```
-
-```
-POST /smell/debug_input
-Body: {"values": [22 floats]}  OR named sensor dict
-Returns: {predicted, top3, ood_score, nearest_centroid_L2, z_scores}
-```
-
-### Training
-
-```
-POST /smell/online_learning
-Body: {"sensor_data": [{...}, ...], "labels": ["coffee", ...]}
-```
-
-```
-POST /smell/learn_from_csv
-Body: {
-  "csv_data": "<full CSV string>",
-  "target_column": "Gas name",
-  "use_augmentation": true,
-  "n_augmentations": 5,
-  "noise_std": 0.0015,
-  "lowercase_labels": true
-}
-```
-
-### Analytics & info
-
-```
-GET /smell/model_info
-  Returns: {
-    classes, accuracy, n_training_runs,
-    per_class_metrics: {class: {precision, recall, "f1-score", support}, ...},
-    confusion_matrix: [[int, ...], ...],
-    confusion_labels: [str, ...],
-    last_test_size: int,
-    feature_importances, feature_names
-  }
-
-GET /smell/visualize_data    → writes PNGs to data/plots/
-  Returns: {
-    confusion_matrix, class_counts, feature_importances,
-    per_class_feature_importance, calibration,
-    calibration_ece: float,
-    environmental_histograms, ...
-  }
-
-GET /smell/drift             → per-sensor live-vs-training drift report
-  Returns: {
-    available: bool,
-    overall_status: "ok" | "warn" | "out" | "na",
-    sensors: [
-      {
-        name, train_mean, train_std, live_mean, live_std,
-        z_shift: (live_mean - train_mean) / train_std,
-        std_ratio: live_std / train_std,
-        status: "ok" | "warn" | "out" | "na"
-      }, ...
-    ],
-    top_shifts: [name, ...],
-    thresholds: {z_warn: 1.5, z_out: 3.0,
-                 std_ratio_warn: [0.5, 2.0], std_ratio_out: [0.25, 4.0]}
-  }
-
-  status="na" means the classifier has no `last_training_data` yet
-  (never trained) or the live buffer is empty — the UI shows a dash.
-
-GET /smell/analyze_data
-GET /smell/environmental_analysis
-GET /health
-GET /
-```
-
-### Live streaming
-
-The server exposes a thread-safe ring buffer (default 1000 slots, see
-`enose/server/live_buffer.py`) that the client fills via HTTP POSTs and
-the UI drains via polling. There is no WebSocket — polling keeps things
-compatible with plain TCP forwarders / proxies that may not handle WS.
-
-```
-POST /sensor/live/push
-Body: {
-  "sample": {"R1": float, ..., "CH2O": float},
-  "client_t": float | null,
-  "label": str | null,                 # optional tag (e.g. "coffee")
-  "classify": bool,
-  "session_id": str | null
-}
-Returns: {ok: true, id: int, buffered: int}
-
-GET /sensor/live/recent?since=<id>&limit=<n>
-Returns: {
-  entries: [{id, ts, values, label, prediction, confidence}, ...],
-  next_since: int,     # poll with this value next time
-  size: int            # current buffer size
-}
-
-GET /sensor/live/stats
-Returns: {
-  size, first_ts, last_ts, hz,
-  per_sensor_mean, per_sensor_std,
-  label_counts, prediction_counts
-}
-
-DELETE /sensor/live/clear
-Returns: {cleared: int}   # number of entries removed
-```
-
-The UI's **Live** tab polls `/sensor/live/recent` once per second with the
-last-seen `next_since`, then draws three inline-SVG charts (R sensors,
-environmental, confidence over time coloured by prediction) plus a drift
-panel that re-hits `/smell/drift`.
-
-The same tab provides two inference paths. **Fast prediction** averages short
-median bins over an adjustable 5, 10, 15, or 30 second window, marks a changing
-response as provisional, and returns `unknown` when confidence or the top-two
-margin is too small. **Classify stable window** is the stricter 60-second
-measurement used for evaluation. **Check recovery** requires both a small
-`abs(log(R/R0))` distance from clean air and a low response slope before the
-next exposure.
-
-```
-POST /smell/baseline/live?window=60
-POST /smell/classify_window?window=15&bin_seconds=5
-POST /smell/classify_stable?window=60
-GET  /smell/recovery?window=15
-```
-
----
-
-## Training the model
-
-### From CSV (recommended for batch data)
-
-Your CSV must have columns matching the sensor names. Unknown columns are ignored; missing sensor columns are filled with defaults.
-
-```csv
-R1,R2,...,R17,T,H,CO2,H2S,CH2O,Gas name
-15.2,8.3,...,21.0,49.0,400,0,5,coffee
-0.1,0.05,...,21.0,49.0,400,0,5,air
-```
-
-Minimum recommended: **20 samples per class**. More is better.
-
-### From the client (hardware or offline)
-
-1. Connect sensors and run the full training pipeline from the client menu (option 1).
-2. The pipeline captures an image, detects the object, records sensor data, and calls `POST /smell/online_learning`.
-
-### Auto retrain logic
-
-- First upload → initial training.
-- Subsequent uploads with **existing classes** → incremental online update.
-- Uploads with **new classes** → full retrain to incorporate the new class correctly.
-
----
-
-## Adding a new smell class
-
-You do not need to change any code. Just:
-
-1. Collect 20+ labelled sensor samples for the new smell.
-2. Upload the CSV via the web UI or `/smell/learn_from_csv`.
-3. The server detects the new class and retrains automatically.
-
----
-
-## Configuration
-
-All constants live in `enose/config.py`:
-
-| Constant | Default | Purpose |
+| Method | Route | Purpose |
 |---|---|---|
-| `VLM_MODEL_PATH` | `model/Florence-2-Large` | Florence-2 weights directory |
-| `SMELL_MODEL_PATH` | `trained_models/smell_classifier_sgd_latest.joblib` | Saved classifier |
-| `TRAINING_DATA_PATH` | `database_robodog.csv` | Training data log |
-| `SERVER_HOST` | `0.0.0.0` | Bind address |
-| `SERVER_PORT` | `8080` | Listen port |
-| `DEFAULT_RECORDING_TIME` | `60` | Recording duration (seconds) |
-| `DEFAULT_TARGET_SAMPLES` | `100` | Target samples per recording |
+| GET | `/`, `/health`, `/smell/model_info` | Version, readiness and model/validation metadata |
+| POST | `/smell/classify` | Named resistance fields, optional env, acquisition metadata and session ID |
+| POST | `/smell/test_console` | 17 or 22 comma-separated values; declare `resistance_unit` for verified-unit models |
+| POST | `/smell/debug_input` | Per-sample diagnostics |
+| POST | `/sensor/live/push` | `sample`, optional `client_t`, `label`, `classify`, `session_id`, `acquisition` |
+| GET | `/sensor/live/recent`, `/sensor/live/stats` | Incremental samples and acquisition/baseline diagnostics |
+| DELETE | `/sensor/live/clear` | Clear live ring buffer |
+| POST | `/smell/baseline`, `/smell/baseline/live` | Capture clean-air batch or live baseline with identity binding |
+| POST | `/smell/classify_window`, `/smell/classify_stable` | Provisional fast bins or strict stable median |
+| GET | `/smell/recovery`, `/smell/drift` | Recovery and live-vs-training drift diagnostics |
+| POST | `/smell/preview_csv`, `/smell/learn_from_csv` | Shared CSV preparation; preview does not fit/change active state |
+| POST | `/smell/online_learning` | Confirmed stable Idea 1 batch with optional acquisition/session/provenance |
+| GET | `/smell/models/candidates` | List candidate manifests |
+| POST | `/smell/models/evaluate` | `candidate_id`, `csv_data`, `target_column`, `resistance_unit`, `independent_confirmed` |
+| POST | `/smell/models/promote` | `candidate_id`, optional `allow_unevaluated`, `allow_regression` |
+| POST | `/smell/models/rollback` | `snapshot_id` |
+| GET | `/smell/visualize_data`, `/smell/analyze_data`, `/smell/environmental_analysis` | Plots and analysis |
 
----
+Example recommended CSV request from Bash (`jq` is an optional shell helper,
+not a Python dependency):
 
-## Programmatic use (Python)
-
-```python
-from enose.client.api import ServerAPI
-
-api = ServerAPI("http://localhost:8080")
-
-# Single-sample classification
-result, err = api.classify_smell({
-    "R1": 15.2, "R2": 8.3, ..., "T": 21.0, "H": 49.0, "CO2": 400, "H2S": 0, "CH2O": 5
-})
-print(result["predicted_smell"], result["confidence"])
-
-# CSV training
-result, err = api.learn_from_csv("my_data.csv", target_column="Gas name")
+```bash
+jq -n --rawfile csv recording.csv '{csv_data:$csv,target_column:"smell_label",resistance_unit:"ohm",training_profile:"plateau",classifier_backend:"balanced_rf",baseline_mode:"logratio",use_augmentation:false,n_augmentations:0,merge_history:true,stage_candidate:true}' | curl -X POST http://SERVER:8016/smell/learn_from_csv -H 'Content-Type: application/json' --data-binary @-
 ```
+
+For canonical R columns include their actual `resistance_unit` column; the
+request unit controls supplier-ohm conversion, not an arbitrary unit rewrite.
+For preview send the same body to `/smell/preview_csv`. Plateau options default
+to 60 s window/stride, 600 s baseline tail, final 25% exposure, 30 s end margin,
+relative slope limit 0.002. Short exposures can yield no accepted windows.
+Set them from experimental evidence, not merely to force acceptance.
+
+The Live tab polls the ring buffer, not a WebSocket. OOD/drift flags describe
+training-distribution mismatch, not chemical proof. Current software checks do
+not establish physical USB/thermal behavior or cross-day recognition accuracy;
+see [TESTING_GUIDE.md](TESTING_GUIDE.md).

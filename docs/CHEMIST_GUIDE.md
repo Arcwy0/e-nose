@@ -1,61 +1,102 @@
-# Browser guide for e-nose experiments
+# Browser guide for e-nose experiments (3.3.0)
 
-This guide is for running smell classification and training without editing
-Python code. A project maintainer must first start the server and give you its
-URL, for example `http://192.168.1.42:8080`.
+A maintainer must start the server and give you its private base URL, for
+example `http://LAB_SERVER:8016`. Open `<SERVER_URL>/ui`. Florence is optional
+for smell-only work; the browser cannot open USB ports or enable the heater.
 
-## Open the interface
+## Classify one sample
 
-Open `<SERVER_URL>/ui` in a browser. The status area should report that the smell
-classifier is loaded. Florence-2 vision is optional for smell-only work.
+1. Open **Classify**. Paste `R1`–`R17`, or all 22 values in order
+   `R1`–`R17`, `T`, `H`, `CO2`, `H2S`, `CH2O`.
+2. Declare the actual resistance unit matching the model. PCB exports default
+   to ohms; historical legacy units must be verified, not guessed.
+3. Select **Classify smell** and record prediction, confidence and OOD status.
 
-## Classify one 22-feature sample
+A 17-feature model ignores environmental fields. Missing environmentals are
+unmeasured defaults, not measured room conditions. PCB heater temperature is
+not ambient `T`. OOD warns of a distribution mismatch; it does not identify
+its physical cause or guarantee a prediction is correct.
 
-1. Open **Classify**.
-2. Paste 22 comma-separated values in this order: `R1`–`R17`, `T`, `H`, `CO2`,
-   `H2S`, `CH2O`.
-3. Select **Classify**.
-4. Record the predicted class, confidence, and OOD status. Treat an OOD warning
-   as an indication that the sample differs from the training distribution.
+## Preview and train a CSV
 
-## Train from a CSV
+1. Supply R1–R17 and a verified label column such as `smell_label`/`Gas name`.
+   Supplier Rs-mode exports are also accepted: `rs_ch0_ohm`–`rs_ch16_ohm` map
+   by index to R1–R17. Physical equivalence to the old array remains unverified.
+2. In **Train**, upload/paste CSV, choose units, label column and recording
+   date/session/recording identity. Environmental columns are optional.
+3. If labels are absent, preview still works. Add verified row annotations or
+   a label column before training. Annotation rows are zero-based data rows,
+   header excluded, with an inclusive start and exclusive end.
+4. For continuous recordings, start with **Stable plateaus**, **Balanced RF +
+   baseline**, **Log ratio to clean air**, augmentation/SNV off. Preview the
+   traces, accepted/rejected windows, class counts and rejection reasons.
+5. Leave **Merge historical data** on for Idea 1. Turn it off for a deliberate
+   one-dataset experiment or to replace incompatible legacy history.
+6. Leave **Stage candidate** on. Training then leaves the active model/history
+   unchanged; the new classes will not appear as active until promotion.
 
-1. Keep one row per measurement.
-2. Provide the 22 sensor columns and a label column such as `Gas name` or
-   `smell_label`.
-3. Open **Train**, upload or paste the CSV, choose its label column, and start
-   training.
-4. Open **Model Info** and verify the known classes and evaluation metrics.
+Default extraction uses 60 s windows/stride, the final 25% of each analyte
+exposure and a 30 s end margin. Short exposures may yield no windows. Do not
+relax stability thresholds merely to force data through. Filenames, waveform
+shapes and container appearance are not chemical labels.
 
-Do not compare accuracy from random rows of the same recording as though it were
-a new-day test. For drift research, keep session/day identifiers and follow
-[`DRIFT_DATA_PROTOCOL.md`](DRIFT_DATA_PROTOCOL.md).
+## Evaluate, promote and roll back
 
-## Watch live measurements
+In **Model Info**, select the candidate and compare it with the active model
+on the **same separately collected labelled CSV**. Explicitly confirm that it
+is independent of both training histories. Exact overlap is rejected, but you
+must still verify independent exposures/days.
 
-The computer connected to the e-nose must run the client in live mode. Once it
-is publishing, open **Live** and select **Start polling**. The plots show the 17
-resistance channels, environmental values, predictions, and drift diagnostics.
+Promote only after reviewing the comparison, and retain the rollback ID.
+A first deployment or missing comparison needs an explicit unevaluated override;
+this is not evidence of accuracy. A known regression needs a separate override.
+Rollback restores the saved model/history pair. Only use trusted artifacts.
 
-`RLOW` is a hardware calibration used when the client converts raw ADC values to
-resistance. The operator can set it when starting the client or through menu
-option 10. Keep it constant within an experiment and write it in the laboratory
-record; changing it rescales all resistance channels.
+If complete independent groups cannot be split, the UI reports **Generalization
+not estimable**, with null accuracy. An empty confusion matrix is then expected;
+it is not proof the model learned one class. Class distribution describes the
+training data, while confusion metrics describe only a valid holdout.
 
-## Recommended experimental record
+## Live measurements and baseline
 
-For every recording, retain:
+The sensor PC must run the [client](CLIENT_QUICKSTART.md) in live mode.
+In **Live**, start polling and inspect units, freshness, device/configuration,
+read/fault counters, heater state and drift. Diagnostics are read-only and may
+be stale if the client stops; they are not safety interlocks.
 
-- date, operator, object/odour label, and session identifier;
-- e-nose serial numbers and `RLOW`;
-- exposure, settling, recording, and purge durations;
-- temperature, humidity, and relevant room conditions;
-- raw/session data, model version, prediction, confidence, and OOD status;
-- the image and VLM-derived label for autonomous Idea-1 training.
+For a baseline-relative model, allow clean air to stabilize, then select
+**Set clean-air baseline**. Recapture after reconnect/session/board/configuration
+changes, model reload or server restart. Client `--live-baseline` changes only
+its plot. Use **Fast prediction** for provisional decisions, **Classify stable
+window** for stricter measurement, and **Check recovery** before the next exposure.
 
-## Where to go next
+## Hardware controls belong on the client
 
-- [`CLIENT_QUICKSTART.md`](CLIENT_QUICKSTART.md): client commands and scenarios.
-- [`TESTING_GUIDE.md`](TESTING_GUIDE.md): complete staged validation.
-- [`MIGRATION.md`](MIGRATION.md): moving the installation to another PC.
-- [`SERVER_CLIENT_GUIDE.md`](SERVER_CLIENT_GUIDE.md): API and deployment details.
+New PCB is default. The original board requires `--sensor-backend legacy`;
+RLOW/menu 10 apply only to its ADC conversion. Keep RLOW constant within an
+experiment. The old board has no INFO/STATUS or binary heater controls.
+
+PCB heating defaults to supplier-configured `external` mode, which never
+enables heat or changes its setpoint. Close the supplier tool before our client
+uses the port. Menu 11 enables monitored PI after confirmation; menu 12 requests
+disable/zero-duty verification. Target defaults to 300°C, host trip to 350°C;
+these are configurable operating controls, not certified safe limits.
+
+Both modes request controlled shutdown on client exit. Disable ramps down;
+zero duty is not a cool sensor. USB loss, forced termination and host/power
+failure cannot guarantee off without a firmware watchdog/interlock.
+`OFF UNVERIFIED` must not be treated as off. Read [PCB safety](PCB_ACQUISITION.md)
+before physical testing. Closing the browser does not stop heating.
+
+## Experimental record
+
+Keep operator/date, verified chemical and concentration, board/channel identity,
+units/calibration (RLOW for legacy), session/exposure IDs, heater setpoint and
+fault/status logs, clean-air/exposure/recovery timing, flow/distance and measured
+ambient conditions. Retain original sequences, labels, image/VLM provenance,
+model version and predictions privately. More rows of one exposure do not create
+independent validation data.
+
+[Client options](../enose/client/README.md) · [Setup](SETUP.md) ·
+[Migration](MIGRATION.md) · [Training details](MODEL_IMPROVEMENTS.md) ·
+[Testing](TESTING_GUIDE.md)
