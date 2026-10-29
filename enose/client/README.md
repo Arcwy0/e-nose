@@ -7,6 +7,16 @@ The package CLI defaults to USB CDC PCB acquisition. Select
 environmentals, status visualization, and compatibility limits. Examples below
 describing raw ADC/RLOW apply to the legacy backend.
 
+Version 3.3.0 adds `--preflight`, configurable `--vision-timeout` and
+`--scene-timeout`, and `--heater-control external|client`. Default external
+mode does not enable heating. Client mode explicitly enables normal PI with
+configurable 300 C target / 350 C host trip threshold; PCB exit requests disable
+and waits for zero-duty confirmation. Ctrl+C cleanup is not a firmware watchdog:
+USB loss, forced kill or host failure cannot guarantee off. Legacy and replay
+never receive binary heater commands. Menu 11/12 controls new-PCB heating;
+menu 13 prints diagnostics. `--live --headless` streams to the browser without
+a local GUI and keeps local recording independent of slow HTTP publication.
+
 ## Quickstart
 
 ```bash

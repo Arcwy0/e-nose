@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "enose"
-version = "3.2.2"
+version = "3.3.0"
 dynamic = ["optional-dependencies"]
 description = "Vision + smell multimodal understanding for a Unitree Go-1 e-nose rig"
 readme = { text = "E-Nose: Florence-2 vision + 22-feature smell classifier (FastAPI server + interactive client).", content-type = "text/plain" }
@@ -37,7 +37,7 @@ client = {file = ["requirements/client.in"]}
 dev = {file = ["requirements/dev.in"]}
 
 [project.scripts]
-enose-server = "enose.server.app:app"
+enose-server = "enose.server.cli:main"
 enose-client = "enose.client.main:main"
 
 [tool.setuptools.packages.find]

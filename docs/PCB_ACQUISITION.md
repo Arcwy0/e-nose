@@ -4,8 +4,8 @@ The supported client entry points (`scripts/run_client.py` / `enose-client`)
 now default to the new USB CDC PCB. The robot trainer's ROS2 launcher uses the
 same factory and default. Simulation remains synthetic and does not open ports.
 The old standalone `client_server.py` remains a legacy implementation; use the
-package client for the new backend. This document describes unreleased source
-changes, not functionality in the previously published v3.2.2 wheel.
+package client for the new backend. This workflow is included in release 3.3.0;
+previously published 3.2.2 wheels do not include it.
 
 ## Select acquisition
 
@@ -47,6 +47,15 @@ dependency layer is needed. Custom images that copy source must be rebuilt.
 | `--port_UART PORT` | Optional separate environmental UART, unchanged 9600 default |
 | `--replay-speed N` | Recorded time multiplier; 1 = original cadence, 0 = one row per read without time gating |
 | `--offline` | Original synthetic smell profiles; not real-data replay |
+| `--preflight --diagnostic-report PATH` | Backend-aware diagnostics then exit; refuses to overwrite report |
+| `--heater-control external` | Default: preserve supplier-configured PI, never enable/write setpoint; monitor existing heat |
+| `--heater-control client` | Explicitly enable normal PI heating; new PCB only |
+| `--heater-target-c 300 --heater-max-c 350` | Configurable target and conservative host trip temperature, deg C |
+| `--heater-max-seconds 1800` | Host-monitored maximum heating session duration, seconds |
+| `--heater-shutdown-timeout 240` | Cooldown deadline including lock wait; serial I/O can finish later |
+| `--vision-timeout 30 --scene-timeout 60` | Configurable HTTP deadlines in seconds; raise explicitly for CPU vision |
+| `--headless` | Publish live without a local plot; also selected automatically on Agg |
+| `--live-http-timeout 2 --prediction-confirmations 2` | Network deadline and local consecutive-prediction confirmation |
 
 `--live-classify` requests predictions only when a fitted model with compatible
 verified units is available. `--record-session PATH` saves canonical samples
@@ -83,10 +92,39 @@ The CH0 -> R1 ... CH16 -> R17 mapping follows logical index order. Equivalence
 to the old physical sensor array and the MCU's complete conversion formula
 remain unverified without further hardware/firmware information.
 
-No heater-enable, temperature-setpoint, calibration, gain, factory-reset, or
-flash-save commands are sent. Use the supplier's tool to prepare hardware safely
-before acquisition. Stop the supplier tool before opening the same port here.
-**STREAM_STOP does not turn off the heater.** Sensor faults, calibration mode,
+No calibration, gain, fixed-duty, factory-reset, or flash-save commands are sent.
+The supplier's tool is the bundled **E-NOSE desktop tool**. Its Heater ON/OFF
+and PI setpoint controls are independent from Start/Stop Stream. Close it before
+our client opens the same port. Existing firmware/settings can continue heating
+after that tool closes; automatic heating must not be assumed in either program.
+
+Our default `external` mode preserves the supplier-prepared setpoint and never
+enables heating. Explicit `client` mode, or client menu 11/local plot Enable,
+uses normal PI control with a default 300 C target and 350 C host trip threshold.
+These are configurable operating controls, not a certified hardware limit.
+Do not assume temperatures above 350 C are safe. Temperature calibration,
+fault-free feedback, normal PI mode, fresh measurements and acknowledged
+setpoint/enable are required. Fixed-duty operation is not supported here.
+
+Client menu 12/local plot Disable and graceful exit request heater-disable and
+wait for matching-request STATUS plus ACK confirming both disabled and actual
+zero duty. Faults, lost measurements, temperature limit and session timeout
+also request disable and lock out automatic re-enable. Ctrl+C/SIGINT, SIGTERM,
+normal return, exceptions and connect failures have cleanup paths. During
+cleanup, repeated graceful signals do not skip verification. The robot runner
+also wraps its existing mission in cleanup; it does not automatically enable
+heating or add real-robot functionality.
+
+**STREAM_STOP alone does not turn off the heater.** Firmware disable can ramp
+down rather than instantly remove power. A timeout, failed ACK, missing matching
+status, USB loss, SIGKILL, OS crash or host power loss is **OFF UNVERIFIED**,
+not a successful shutdown. No host-loss watchdog/emergency-off command is
+documented in the supplied firmware. A firmware watchdog or independent power
+interlock is required for an unconditional fail-off guarantee. Residual heat can
+remain even after duty reaches zero. Never leave this unvalidated setup unattended.
+
+Legacy acquisition receives no INFO, STATUS or binary heater commands; its
+existing board-controlled heating remains outside this integration. Sensor faults, calibration mode,
 temperature open-circuit flags, RAW mode, non-positive values, and stale/duplicate
 frames are rejected. No undocumented saturation threshold is guessed. Reconnect
 explicitly after USB loss; there is no silent fallback to the old board or fake data.
@@ -130,6 +168,55 @@ the last accepted frame; rejected fault frames are logged in the client and the
 browser becomes stale if valid readings stop. These diagnostics are not heater
 controls or safety interlocks. Frame gaps, resets, and configuration changes
 break curves instead of implying uninterrupted acquisition.
+
+Local recording runs on acquisition callbacks, before HTTP. A separate bounded
+latest-sample network queue prevents slow requests from blocking local sampling.
+Unsent frames remain in local recordings without predictions; this does not
+promise capture of every MCU frame when client polling is slower. Idle polls,
+read failures and network-skipped frames have separate counters. Local repeated
+prediction confirmation adds delay; fast-window predictions remain provisional
+when unstable. Agg/headless live mode keeps publishing until interruption or
+the end of a replay instead of exiting at once.
+
+## Preview, annotation, evaluation, and deployment
+
+Train > Preview CSV does not fit a model or write active history. It plots the
+source R channels and kept/rejected windows, including reasons and class counts.
+Adjust window/stride, stable-tail fraction, end margin and slope explicitly.
+Defaults remain 60 s windows, final 25% of an exposure, and 30 s end margin;
+therefore exposures shorter than roughly 6 minutes may yield no analyte windows.
+Do not loosen stability gates merely to make a file pass.
+
+Supply verified `smell_label` rows, or explicit annotations with zero-based
+source data rows `[start_row,end_row)` (header excluded). Source-row references
+remain stable after fault filtering. Unlabelled gaps never become a chemical
+class or connect an exposure to the wrong clean-air phase. Set recording date
+and session/recording identity explicitly for time-only exports. File names and
+waveform shapes never establish chemical ground truth.
+
+Manual Classify requires a declared resistance unit for verified-unit models.
+Live clean-air baselines are bound to board/configuration, connection segment,
+and publisher session; changes require a fresh baseline. A recorded physical
+identity is provenance, not proof of electrical cross-board equivalence.
+
+The UI defaults to staging candidates without changing active model/history.
+Historical merging is still the default data policy. API `stage_candidate=false`
+retains the older immediate-update workflow. Model Info lists candidates,
+supports explicitly independent CSV comparison on the SAME rows for both models,
+explicit promotion, and recoverable rollback snapshots. Exact training-row
+overlap is refused; near-duplicate/session independence still requires operator
+confirmation. No automatic accuracy improvement is inferred from different
+training holdouts. Paired comparison uses persisted training baseline fallbacks;
+it does not adapt using the evaluation labels or modify the active live baseline.
+
+Unestimable group holdout metrics are null with an explicit warning, not a
+row-wise fallback accuracy. Learned preprocessing and probability calibration
+are group-isolated. Final deployment is refitted after holdout diagnostics are
+frozen. Promotion without independent paired evidence needs explicit override;
+known regression is blocked unless separately overridden. Snapshots preserve
+the old model/history pair, but two-file replacement is not crash-atomic. Keep
+one server worker, protect the UI/API with private network access, and back up
+artifacts before changing deployments. The browser never energizes heaters.
 
 NPZ sessions keep their existing keys and add Unicode JSON acquisition metadata;
 loading does not require pickle. Older recordings remain readable. Local PCB

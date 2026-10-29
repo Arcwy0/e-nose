@@ -42,6 +42,20 @@ own model, so keep the default single worker unless memory permits more.
 The web UI is at **http://localhost:8080/ui**.  
 Interactive API docs are at **http://localhost:8080/docs**.
 
+Version 3.3.0 also installs a working `enose-server --host ... --port ...`
+console command. Use one worker: buffers, live baseline identity, and deployment
+locks are process-local. The Train tab previews configurable CSV extraction and
+stages candidates by default, preserving the active model/history until explicit
+promotion. Model Info supports independent paired evaluation and rollback.
+Missing independent exposures produce null metrics with an explanation, not a
+row-wise substitute. These endpoints have no built-in authentication: restrict
+the server to a trusted private network/proxy. No HTTP route enables heaters.
+
+Vision request deadlines are client settings (`--vision-timeout`,
+`--scene-timeout`, or `ENOSE_VISION_TIMEOUT` / `ENOSE_SCENE_TIMEOUT`). Raising
+them permits slower CPU inference; it does not make the model faster. PCB
+heater controls and preflight live in the acquisition client, not this server.
+
 ## Module layout
 
 ```

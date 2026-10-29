@@ -72,9 +72,11 @@ CUDA extension installation is described in [`docs/SETUP.md`](docs/SETUP.md#flas
 For an existing installation, create a fresh environment from the lock rather
 than upgrading individual ML libraries. The old **3.2.0 wheel does not contain
 the 3.2.1 dependency/loader fixes**; client-only users can continue using it.
-Use [release v3.2.2](https://github.com/Arcwy0/e-nose/releases/tag/v3.2.2) for
-the additional tokenizer-file recovery and detection decoding/display fixes.
-Update both the server and camera client; the dependency lock is unchanged.
+Use [release v3.3.0](https://github.com/Arcwy0/e-nose/releases/tag/v3.3.0) for
+PCB acquisition, configurable monitored heating, backend-aware preflight,
+CSV previews, and staged model deployment. It retains the v3.2.2 Florence fixes.
+Update both server and client; the dependency lock is unchanged. Older wheels
+do not contain the new PCB workflow.
 
 Florence weights, trained smell models, and experimental datasets are separate
 from the wheel and source checkout. Follow the [download instructions](docs/SETUP.md#3-download-florence-2-large)
@@ -154,7 +156,13 @@ python scripts/run_client.py --port_enose /dev/ttyACM0 --server http://localhost
 python scripts/run_client.py --sensor-backend legacy --port_enose /dev/ttyUSB0 --port_UART /dev/ttyUSB1 --server http://localhost:8080
 
 # Real measurements from a desktop CSV, no physical sensor required
-python scripts/run_client.py --sensor-backend replay --sensor-csv /path/to/recording.csv --live --server http://localhost:8080
+python scripts/run_client.py --sensor-backend replay --sensor-csv /path/to/recording.csv --live --headless --server http://localhost:8080
+
+# Diagnostic only: legacy backend never receives binary INFO/STATUS commands
+python scripts/run_client.py --sensor-backend pcb --port_enose /dev/ttyACM0 --preflight --diagnostic-report outputs/preflight.json
+
+# Explicit opt-in PI heating (target/max are deg C, no flash writes)
+python scripts/run_client.py --port_enose /dev/ttyACM0 --heater-control client --heater-target-c 300 --heater-max-c 350
 ```
 
 The PCB/replay default unit is **ohm**. `--resistance-unit kohm` or `mohm`
@@ -165,8 +173,18 @@ historical merging instead of silently rescaling. Back up models/history before
 choosing replacement training. Unlabelled CSVs can be replayed but cannot train.
 
 See [PCB acquisition and replay](docs/PCB_ACQUISITION.md) for setup, metadata,
-UI diagnostics, limitations, and software-only validation. This feature requires
-the updated source; the previously published v3.2.2 wheel does not contain it.
+UI diagnostics, limitations, and software-only validation. PCB heating defaults
+to `--heater-control external`: use settings prepared in the supplier's tool,
+close that tool, then connect here. This mode does not enable heating or write
+a setpoint. Both PCB modes request controlled heater shutdown on client exit.
+Zero duty is reported only after fresh firmware confirmation. Host crashes,
+USB loss, power loss, and forced kills cannot guarantee off with this firmware.
+
+The Train tab previews labels and retained/rejected windows before fitting.
+Candidate staging keeps the active model/history unchanged until explicit
+promotion; rollback snapshots preserve the previous pair. Historical merging
+remains the default data policy. Independent validation may be unavailable for
+single-exposure data; the UI reports this instead of row-split accuracy.
 
 ### 5 — Remote clients (colleagues on the LAN or a private tunnel)
 
