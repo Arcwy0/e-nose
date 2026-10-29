@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import datetime
+import json
 import os
 import time
 from typing import Dict, List
@@ -47,13 +48,30 @@ class TrainingPipeline:
         if not sensor_data:
             return
         try:
+            metadata = self.enose_sensor.get_acquisition_metadata()
+            log_path = self.local_data_path
+            if metadata.get("backend") in ("pcb", "replay"):
+                # Do not append newly-default ohms to a historical RLOW-scale
+                # CSV. A sidecar alone would be ignored by CSV training.
+                from pathlib import Path
+                path = Path(log_path)
+                unit = metadata["resistance_unit"]
+                log_path = str(path.with_name(f"{path.stem}.{metadata['backend']}-{unit}{path.suffix}"))
             df = pd.DataFrame(sensor_data)
             df["smell_label"] = object_name
             df["timestamp"] = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            header = not os.path.isfile(self.local_data_path)
-            df.to_csv(self.local_data_path, mode="a", header=header, index=False)
+            if metadata.get("backend") in ("pcb", "replay"):
+                df["resistance_unit"] = metadata["resistance_unit"]
+            header = not os.path.isfile(log_path)
+            if not header and list(pd.read_csv(log_path, nrows=0).columns) != list(df.columns):
+                raise ValueError("Local log schema changed; use a new recording filename")
+            df.to_csv(log_path, mode="a", header=header, index=False)
+            with open(log_path + ".acquisition.jsonl", "a", encoding="utf-8") as handle:
+                handle.write(json.dumps({"saved_at": datetime.datetime.now().isoformat(),
+                                         "n_samples": len(sensor_data), "label": object_name,
+                                         "acquisition": metadata}, allow_nan=False) + "\n")
             mode = "simulated" if self.enose_sensor.offline_mode else "hardware"
-            print(f"Logged {len(sensor_data)} {mode} samples → {self.local_data_path}")
+            print(f"Logged {len(sensor_data)} {mode} samples → {log_path}")
         except Exception as e:
             print(f"Local save error: {e}")
 
@@ -163,7 +181,10 @@ class TrainingPipeline:
                 self.display_22_feature_sample(avg)
 
             print("Step 4: online learning (stable median windows)")
-            result, err = self.server_api.online_learning(sensor_data, object_name)
+            result, err = self.server_api.online_learning(
+                sensor_data, object_name,
+                acquisition=self.enose_sensor.get_acquisition_metadata(),
+            )
             if err:
                 print(f"Online learning failed: {err}")
                 return False
@@ -218,7 +239,9 @@ class TrainingPipeline:
                 print(f"Warning: expected {N_FEATURES} features, got {len(reading)}")
 
             self.display_22_feature_sample(reading)
-            result, err = self.server_api.classify_smell(reading)
+            result, err = self.server_api.classify_smell(
+                reading, acquisition=self.enose_sensor.get_acquisition_metadata(),
+            )
             if err:
                 print(f"Classification failed: {err}")
                 return False
@@ -328,6 +351,7 @@ class TrainingPipeline:
                 classifier_backend,
                 baseline_mode,
                 snv,
+                resistance_unit=getattr(self.enose_sensor, "resistance_unit", "ohm"),
             )
             if err:
                 print(f"CSV learning failed: {err}")

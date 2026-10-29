@@ -32,6 +32,7 @@ class SensorData(BaseModel):
     CO2: float = 400.0
     H2S: float = 0.0
     CH2O: float = 5.0
+    acquisition: Optional[Dict[str, Any]] = None
 
 
 class CommitProvenance(BaseModel):
@@ -59,6 +60,7 @@ class OnlineLearningData(BaseModel):
     sensor_data: List[Dict[str, float]]
     labels: List[str]
     provenance: Optional[CommitProvenance] = None
+    acquisition: Optional[Dict[str, Any]] = None
 
 
 class BaselineData(BaseModel):
@@ -77,6 +79,9 @@ class CSVLearningData(BaseModel):
 
     csv_data: str
     target_column: str = "smell_label"
+    # Only desktop rs_ch*_ohm exports are converted; canonical R columns are
+    # never rescaled. Smell labels still must be supplied by the experimenter.
+    resistance_unit: str = "ohm"
     use_augmentation: bool = True
     n_augmentations: int = 5
     noise_std: float = 0.0015

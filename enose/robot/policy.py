@@ -384,8 +384,10 @@ class Policy:
             return
 
         provenance = self._build_provenance(det)
+        acquisition = getattr(self.adapters.sensor, "get_acquisition_metadata", lambda: None)()
         result, err = self.adapters.server_api.online_learning(
             self._collected_samples, target.label, provenance=provenance,
+            **({"acquisition": acquisition} if acquisition and acquisition.get("backend") in ("pcb", "replay") else {}),
         )
         if err:
             self.last_error = f"online_learning: {err}"

@@ -188,11 +188,14 @@ class ServerAPI:
             return None, f"Scene detection error: {e}"
 
     # ── Classification ────────────────────────────────────────────────────
-    def classify_smell(self, sensor_data: Dict[str, float]) -> Result:
+    def classify_smell(self, sensor_data: Dict[str, float], acquisition: Optional[Dict[str, Any]] = None) -> Result:
         try:
             if len(sensor_data) != N_FEATURES:
                 print(f"Warning: expected {N_FEATURES} features, got {len(sensor_data)}")
-            r = requests.post(f"{self.base_url}/smell/classify", json=sensor_data, timeout=5)
+            payload = dict(sensor_data)
+            if acquisition is not None:
+                payload["acquisition"] = acquisition
+            r = requests.post(f"{self.base_url}/smell/classify", json=payload, timeout=5)
             return self._handle_response(r)
         except requests.exceptions.Timeout:
             return None, "Classification timeout"
@@ -226,6 +229,7 @@ class ServerAPI:
         sensor_data: List[Dict[str, float]],
         object_name: str,
         provenance: Optional[Dict[str, Any]] = None,
+        acquisition: Optional[Dict[str, Any]] = None,
     ) -> Result:
         """Commit a labelled batch. ``provenance`` is an optional audit-trail
         dict matching the server's ``CommitProvenance`` schema — see
@@ -240,6 +244,8 @@ class ServerAPI:
             }
             if provenance is not None:
                 payload["provenance"] = provenance
+            if acquisition is not None:
+                payload["acquisition"] = acquisition
             r = requests.post(
                 f"{self.base_url}/smell/online_learning",
                 json=payload, timeout=30,
@@ -277,6 +283,7 @@ class ServerAPI:
         classifier_backend: str = "balanced_rf",
         baseline_mode: str = "none",
         snv: bool = False,
+        resistance_unit: str = "ohm",
     ) -> Result:
         try:
             df = pd.read_csv(csv_file_path)
@@ -304,6 +311,7 @@ class ServerAPI:
                 "classifier_backend": classifier_backend,
                 "baseline_mode": baseline_mode,
                 "snv": snv,
+                "resistance_unit": resistance_unit,
             }
             mode = "merge history" if merge_history else "replace history"
             print(f"Sending CSV learning request: {mode}, aug={use_augmentation}(n={n_augmentations})")

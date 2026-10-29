@@ -30,6 +30,8 @@ Design choices worth knowing:
 from __future__ import annotations
 
 import queue
+import copy
+import json
 import threading
 import time
 import uuid
@@ -60,6 +62,8 @@ class LivePublisher:
     The ``on_sample`` callback is invoked synchronously from the publisher
     thread — keep it cheap (e.g. `queue.put_nowait`). The plot class uses
     that to decouple the network loop from the rendering loop.
+    ``on_complete`` receives a separate snapshot after optional HTTP prediction;
+    recorders should use it when they need the completed classification.
     """
 
     def __init__(
@@ -72,6 +76,7 @@ class LivePublisher:
         on_sample: Optional[Callable[[Dict], None]] = None,
         http_timeout: float = 2.0,
         pose_lookup: Optional[Callable[[], Optional[Dict[str, float]]]] = None,
+        on_complete: Optional[Callable[[Dict], None]] = None,
     ) -> None:
         self.sensor = sensor
         self.server_url = server_url.rstrip("/") if server_url else ""
@@ -80,6 +85,7 @@ class LivePublisher:
         self.session_id = uuid.uuid4().hex[:12]
         self.session_label = session_label
         self.on_sample = on_sample
+        self.on_complete = on_complete
         self._timeout = http_timeout
         # When set, called once per tick to get the robot's current pose;
         # the returned dict (or None) is attached to the live-buffer push so
@@ -129,26 +135,45 @@ class LivePublisher:
             sample = self._read_one()
             if sample is None:
                 continue
+            # Timestamp completion, not the start of a blocking sensor read.
+            sample_t = time.time()
 
             entry = {
-                "t": now,
+                "t": sample_t,
                 "sample": sample,
                 "session_id": self.session_id,
                 "label": self.session_label,
             }
+            metadata = getattr(self.sensor, "get_acquisition_metadata", None)
+            if callable(metadata):
+                try:
+                    acquisition = json.loads(json.dumps(metadata(), allow_nan=False))
+                    if not isinstance(acquisition, dict) or not acquisition:
+                        raise ValueError("Acquisition metadata must be a non-empty object")
+                    entry["acquisition"] = acquisition
+                except (TypeError, ValueError, OSError):
+                    # Never downgrade a failed PCB provenance read to a
+                    # metadata-free legacy sample and bypass unit checks.
+                    self.n_read_failed += 1
+                    self.last_error = "acquisition metadata unavailable; sample skipped"
+                    continue
             pose = self._lookup_pose()
             if pose is not None:
                 entry["pose"] = pose
-            # Fire local callback first — the plot cares about smoothness
-            # more than it cares about server round-trips.
+            # Plot/robot consumers receive the reading immediately. HTTP may
+            # enrich only our private entry, never the already-submitted copy.
             if self.on_sample is not None:
                 try:
-                    self.on_sample(entry)
+                    self.on_sample(copy.deepcopy(entry))
                 except Exception:  # pragma: no cover — defensive
                     pass
-
             if self.server_url:
-                self._push(now, sample, entry, pose=pose)
+                self._push(sample_t, sample, entry, pose=pose)
+            if self.on_complete is not None:
+                try:
+                    self.on_complete(copy.deepcopy(entry))
+                except Exception:  # pragma: no cover — defensive
+                    pass
 
     def _lookup_pose(self) -> Optional[Dict[str, float]]:
         if self.pose_lookup is None:
@@ -194,6 +219,9 @@ class LivePublisher:
             payload["label"] = self.session_label
         if pose is not None:
             payload["pose"] = pose
+        if entry.get("acquisition"):
+            payload["acquisition"] = entry["acquisition"]
+        prediction_received = False
         try:
             r = requests.post(
                 f"{self.server_url}/sensor/live/push",
@@ -208,25 +236,25 @@ class LivePublisher:
             except ValueError:
                 body = {}
             if self.classify and isinstance(body, dict):
-                # The push endpoint already embeds predicted/confidence/top3
-                # into the buffer entry; we need to re-fetch if we want it,
-                # OR the publisher can hit /smell/classify itself. Simpler:
-                # hit /smell/classify directly here so the local plot has
-                # the classification without a GET round-trip.
-                pass
+                if body.get("prediction_error"):
+                    entry["prediction_error"] = str(body["prediction_error"])
+                    prediction_received = True
+                    self.last_error = entry["prediction_error"]
+                elif body.get("predicted") is not None:
+                    entry.update({k: body[k] for k in ("predicted", "confidence", "top3") if k in body})
+                    prediction_received = True
             self.n_pushed += 1
         except requests.RequestException as e:
             self.n_push_failed += 1
             self.last_error = f"push: {e}"
 
-        # Separate classify call so the local plot has prediction + confidence
-        # too. We could inline this with push, but keeping them split means
-        # a classify failure (unfitted model) doesn't lose the sample push.
-        if self.classify:
+        # Compatibility fallback for older servers without prediction echoes,
+        # or a failed push. New servers avoid this duplicate inference.
+        if self.classify and not prediction_received:
             try:
                 r = requests.post(
                     f"{self.server_url}/smell/classify",
-                    json=sample,
+                    json={**sample, **({"acquisition": entry["acquisition"]} if entry.get("acquisition") else {})},
                     timeout=self._timeout,
                 )
                 if r.ok:
@@ -234,7 +262,7 @@ class LivePublisher:
                     entry["predicted"] = body.get("predicted_smell")
                     entry["confidence"] = body.get("confidence")
                     entry["probabilities"] = body.get("probabilities", {})
-            except requests.RequestException:
+            except (requests.RequestException, ValueError):
                 pass
 
 
@@ -279,10 +307,30 @@ class LiveSensorPlot:
     def submit(self, entry: Dict) -> None:
         """Publisher callback — just stashes the entry. Rendering happens in run()."""
         with self._lock:
+            if self._entries and self._acquisition_identity(entry) != self._acquisition_identity(self._entries[-1]):
+                # A baseline is only meaningful for one board/configuration/unit.
+                self._baseline = {}
+                self._baseline_ready = False
+                self._entries.clear()
+                self._t0 = None
             if self._t0 is None:
                 self._t0 = entry.get("t", time.time())
             self._entries.append(entry)
             self._update_baseline_locked()
+
+    @staticmethod
+    def _acquisition_identity(entry: Dict) -> str:
+        metadata = entry.get("acquisition") or {}
+        return json.dumps({k: metadata.get(k) for k in
+                           ("backend", "device_id", "resistance_unit", "segment_id", "config")}, sort_keys=True)
+
+    def complete(self, entry: Dict) -> None:
+        """Enrich an already-plotted frame without appending it a second time."""
+        with self._lock:
+            for existing in reversed(self._entries):
+                if existing.get("t") == entry.get("t") and existing.get("session_id") == entry.get("session_id"):
+                    existing.update(entry)
+                    break
 
     def _update_baseline_locked(self) -> None:
         """Compute baseline once enough samples have accumulated.
@@ -378,6 +426,27 @@ class LiveSensorPlot:
         if not entries:
             return
 
+        metadata = entries[-1].get("acquisition") or {}
+        age = max(0.0, time.time() - entries[-1]["t"]) + float(metadata.get("sample_age_seconds") or 0.0)
+        stale_after = float(metadata.get("stale_after_seconds") or 3.0)
+        # Insert missing points rather than drawing straight across lost frames,
+        # disconnected periods, or a board counter reset. Frame skips alone are
+        # normal when the publisher runs slower than the board stream.
+        intervals = sorted(b["t"] - a["t"] for a, b in zip(entries, entries[1:]) if b["t"] > a["t"])
+        gap_limit = max(3.0, 3.0 * intervals[len(intervals) // 2]) if intervals else 3.0
+        spaced = []
+        for entry in entries:
+            if spaced:
+                previous = spaced[-1]
+                before = previous.get("acquisition") or {}
+                after = entry.get("acquisition") or {}
+                counter_reset = (before.get("frame_index") is not None and after.get("frame_index") is not None
+                                 and after["frame_index"] <= before["frame_index"])
+                dropped = after.get("dropped_frames", 0) > before.get("dropped_frames", 0)
+                if entry["t"] - previous["t"] > gap_limit or counter_reset or dropped:
+                    spaced.append({"t": entry["t"], "sample": {}})
+            spaced.append(entry)
+        entries = spaced
         ts = [e["t"] - t_now for e in entries]  # seconds-from-now, negative
 
         ax_r, ax_e = self._axes[0], self._axes[1]
@@ -394,10 +463,12 @@ class LiveSensorPlot:
                     for v in vals]
             ax_r.plot(ts, vals, lw=0.9, alpha=0.75, label=name)
 
-        ax_r.set_ylabel(("ΔR" if sub else "R") + " (scaled)")
+        unit = {"ohm": "Ω", "kohm": "kΩ", "mohm": "MΩ"}.get(metadata.get("resistance_unit"), metadata.get("resistance_unit", "legacy / unspecified"))
+        ax_r.set_ylabel(("ΔR" if sub else "R") + f" ({unit})")
         ax_r.set_title(
             f"{self.title_prefix} — {len(entries)} samples, window={self.window_seconds:.0f}s"
             + (" [baseline-subtracted]" if sub else "")
+            + f" — sample age {age:.1f}s" + (" [STALE]" if age > stale_after else "")
         )
         ax_r.grid(True, alpha=0.3)
         ax_r.legend(loc="upper left", ncol=6, fontsize=6, framealpha=0.7)
@@ -407,7 +478,8 @@ class LiveSensorPlot:
         # normalize-per-sensor to a 0-1 band and label with units in legend.
         env_labels: List[str] = []
         for name in ENVIRONMENTAL_SENSORS:
-            vals_raw = [e.get("sample", {}).get(name) for e in entries]
+            vals_raw = [e.get("sample", {}).get(name) for e in entries
+                        if (e.get("acquisition") or {}).get("environment_source") != "defaults"]
             vals_raw = [v for v in vals_raw if v is not None]
             if not vals_raw:
                 continue
@@ -415,11 +487,15 @@ class LiveSensorPlot:
             vmax = max(vals_raw)
             rng = (vmax - vmin) or 1.0
             ys = [(float(v) - vmin) / rng if v is not None else float("nan")
-                  for v in [e.get("sample", {}).get(name) for e in entries]]
+                  for v in [e.get("sample", {}).get(name)
+                            if (e.get("acquisition") or {}).get("environment_source") != "defaults" else None
+                            for e in entries]]
             ax_e.plot(ts, ys, lw=1.1, label=f"{name} [{vmin:.1f}–{vmax:.1f}]")
             env_labels.append(name)
 
         ax_e.set_ylabel("env (normalized)")
+        if metadata.get("environment_source") == "defaults":
+            ax_e.set_title("Environmental values unmeasured (compatibility defaults are not plotted)", fontsize=9)
         ax_e.set_xlabel("time before now (s)")
         ax_e.set_ylim(-0.05, 1.05)
         ax_e.grid(True, alpha=0.3)
@@ -495,7 +571,7 @@ def run_live_dashboard(
             session_label=session_label,
         )
 
-    callback = tee_callbacks(plot.submit, recorder.submit if recorder else None)
+    completed_callback = tee_callbacks(plot.complete, recorder.submit if recorder else None)
 
     pub = LivePublisher(
         sensor=sensor,
@@ -503,7 +579,8 @@ def run_live_dashboard(
         rate_hz=rate_hz,
         classify=classify,
         session_label=session_label,
-        on_sample=callback,
+        on_sample=plot.submit,
+        on_complete=completed_callback,
     )
     if recorder is not None:
         recorder.session_id = pub.session_id

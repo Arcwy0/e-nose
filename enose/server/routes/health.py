@@ -17,6 +17,7 @@ from enose.config import (
 
 from .. import state
 from ..jsonsafe import json_safe
+from enose.utils.acquisition import model_resistance_unit
 
 router = APIRouter()
 
@@ -91,7 +92,9 @@ async def get_model_info() -> JSONResponse:
             headers=_NO_STORE,
         )
     try:
-        return JSONResponse(json_safe(state.smell_classifier.get_model_info()), headers=_NO_STORE)
+        info = state.smell_classifier.get_model_info()
+        info["resistance_unit"] = model_resistance_unit(state.smell_classifier)
+        return JSONResponse(json_safe(info), headers=_NO_STORE)
     except Exception as e:
         print(f"[model_info] error: {e}")
         raise HTTPException(status_code=500, detail=str(e))

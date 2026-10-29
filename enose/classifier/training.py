@@ -15,6 +15,7 @@ import numpy as np
 import pandas as pd
 
 from enose.config import ALL_SENSORS, TRAINING_DATA_PATH
+from enose.utils.acquisition import frame_resistance_unit, normalize_resistance_unit, training_resistance_unit
 from enose.utils.csv_io import (
     ensure_canonical_columns,
     load_training_csv,
@@ -48,8 +49,13 @@ def _load_history(classifier) -> Optional[pd.DataFrame]:
     """Find prior training data: CSV on disk first, then classifier's in-memory record."""
     df = load_training_csv(DEFAULT_CSV_CANDIDATES)
     if df is not None:
-        return ensure_canonical_columns(df)
-    return _frame_from_classifier_memory(classifier)
+        frame = ensure_canonical_columns(df)
+        frame.attrs["acquisition_history_source"] = "disk"
+        return frame
+    frame = _frame_from_classifier_memory(classifier)
+    if frame is not None:
+        frame.attrs["acquisition_history_source"] = "memory"
+    return frame
 
 
 _GROUP_CANDIDATES: Tuple[str, ...] = (
@@ -230,6 +236,7 @@ def retrain_with_all_data(
     classifier_backend: Optional[str] = None,
     baseline_mode: Optional[str] = None,
     snv: Optional[bool] = None,
+    acquisition_resistance_unit: Optional[str] = None,
 ) -> Tuple[bool, float, Optional[BalancedRFClassifier]]:
     """Train fresh, optionally merging prior history, and save canonical history.
 
@@ -260,6 +267,31 @@ def retrain_with_all_data(
         ) if cfg else True
 
     history = _load_history(classifier) if merge_history else None
+    frame_unit = frame_resistance_unit(new_X)
+    explicit_unit = normalize_resistance_unit(acquisition_resistance_unit)
+    if explicit_unit and frame_unit and explicit_unit != frame_unit:
+        raise ValueError(f"Incoming resistance unit metadata {explicit_unit} conflicts with CSV rows {frame_unit}")
+    incoming_unit = explicit_unit or frame_unit
+    history_present = history is not None and len(history) > 0
+    history_unit = None
+    if history_present:
+        history_unit = frame_resistance_unit(history)
+        if history_unit is None and history.attrs.get("acquisition_history_source") == "memory":
+            # Only this classifier's own in-memory training rows can inherit
+            # its verified units. An unrelated disk CSV cannot.
+            history_unit = normalize_resistance_unit(getattr(classifier, "acquisition_resistance_unit_", None))
+        if history_unit != incoming_unit:
+            raise ValueError(
+                f"Persistent history resistance units are {history_unit or 'unverified'}, "
+                f"but incoming units are {incoming_unit or 'unverified'}. "
+                "Refusing to merge or relabel history. Back up the model/history, "
+                "then use replacement training (merge_history=false) with correctly annotated data."
+            )
+    resolved_unit = training_resistance_unit(
+        classifier, incoming_unit, merge_history=merge_history,
+        # Explicitly annotated compatible history was verified independently.
+        has_history=history_present and history_unit is None,
+    )
 
     new_frame = new_X.copy()
     new_frame["smell_label"] = pd.Series(new_y).astype(str).values
@@ -271,6 +303,8 @@ def retrain_with_all_data(
         combined = new_frame
         reason = "replace mode" if not merge_history else "no history found"
         print(f"[training] {reason} — training on new batch only")
+    if resolved_unit:
+        combined["resistance_unit"] = resolved_unit
 
     # drop rows with unusable labels
     mask = combined["smell_label"].notna() & (combined["smell_label"] != "") & (combined["smell_label"] != "unknown")
@@ -333,6 +367,7 @@ def retrain_with_all_data(
     if effective_snv is not None:
         fresh_config.snv = bool(effective_snv)
     fresh = cls(online_learning=True, config=fresh_config)
+    fresh.acquisition_resistance_unit_ = resolved_unit
     fresh.original_features = list(ALL_SENSORS)
     bal_acc = fresh.train(
         X_all, y_all,

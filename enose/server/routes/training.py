@@ -18,6 +18,7 @@ from enose.classifier.training import retrain_with_all_data
 from enose.utils.csv_io import parse_uploaded_enose_csv
 from enose.utils.plateau import build_plateau_training_frame
 from enose.utils.quality import analyze_recording_quality, summarize_online_capture
+from enose.utils.acquisition import frame_resistance_unit, normalize_resistance_unit, training_resistance_unit
 from enose.config import (
     ALL_SENSORS,
     DATA_DIR,
@@ -106,6 +107,16 @@ def _fill_missing_sensors(X: pd.DataFrame) -> pd.DataFrame:
     return X[ALL_SENSORS + extras]
 
 
+def _retrain_with_units(*args, **kwargs):
+    """Map provenance conflicts to an actionable response, before disk writes."""
+    try:
+        return retrain_with_all_data(*args, **kwargs)
+    except ValueError as exc:
+        if "unit" in str(exc).lower():
+            raise HTTPException(status_code=409, detail=str(exc))
+        raise
+
+
 @router.post("/smell/online_learning")
 async def online_learning(data: OnlineLearningData) -> Dict[str, Any]:
     """Incremental training. Retrains from scratch when new classes or weight mismatch appear."""
@@ -115,6 +126,15 @@ async def online_learning(data: OnlineLearningData) -> Dict[str, Any]:
         raise HTTPException(status_code=400, detail="Both sensor_data and labels required")
     if len(data.sensor_data) != len(data.labels):
         raise HTTPException(status_code=400, detail="Sensor data and labels length mismatch")
+
+    acquisition = data.acquisition or {}
+    incoming_unit = normalize_resistance_unit(acquisition.get("resistance_unit"))
+    if acquisition.get("backend") in {"pcb", "replay"} and incoming_unit is None:
+        raise HTTPException(status_code=400, detail="PCB/replay online learning requires explicit ohm/kohm/mohm resistance units")
+    try:
+        training_resistance_unit(clf, incoming_unit)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
 
     print(f"[online_learning] {len(data.sensor_data)} samples; labels={sorted(set(data.labels))}")
 
@@ -189,8 +209,9 @@ async def online_learning(data: OnlineLearningData) -> Dict[str, Any]:
             new_classes, mismatch = _detect_new_classes_or_mismatch(clf, new_labels.unique())
             if new_classes or mismatch:
                 print(f"[online_learning] retraining — new_classes={new_classes}, mismatch={mismatch}")
-                ok, accuracy, fresh = retrain_with_all_data(
+                ok, accuracy, fresh = _retrain_with_units(
                     clf, df, new_labels, use_augmentation=True, n_augmentations=3,
+                    acquisition_resistance_unit=incoming_unit,
                 )
                 if not ok or fresh is None:
                     raise HTTPException(status_code=500, detail="Retraining failed")
@@ -205,8 +226,9 @@ async def online_learning(data: OnlineLearningData) -> Dict[str, Any]:
                 # would train on this single-class batch alone and crash with
                 # "target y needs more than 1 class". retrain_with_all_data pulls
                 # history from the persistent CSV, so training stays multi-class.
-                ok, accuracy, fresh = retrain_with_all_data(
+                ok, accuracy, fresh = _retrain_with_units(
                     clf, df, new_labels, use_augmentation=True, n_augmentations=2,
+                    acquisition_resistance_unit=incoming_unit,
                 )
                 if not ok or fresh is None:
                     raise HTTPException(status_code=500, detail="Retraining failed")
@@ -215,10 +237,11 @@ async def online_learning(data: OnlineLearningData) -> Dict[str, Any]:
                 update_type = "online_update"
         else:
             print("[online_learning] initial training")
-            ok, accuracy, fresh = retrain_with_all_data(
+            ok, accuracy, fresh = _retrain_with_units(
                 clf, df, new_labels,
                 use_augmentation=True,
                 n_augmentations=5,
+                acquisition_resistance_unit=incoming_unit,
             )
             if not ok or fresh is None:
                 raise HTTPException(status_code=500, detail="Initial training failed")
@@ -292,7 +315,8 @@ async def learn_from_csv(data: CSVLearningData) -> Dict[str, Any]:
 
     try:
         df, csv_parse_report = parse_uploaded_enose_csv(
-            data.csv_data, label_column=data.target_column
+            data.csv_data, label_column=data.target_column,
+            pcb_resistance_unit=data.resistance_unit,
         )
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Invalid CSV format: {e}")
@@ -302,6 +326,19 @@ async def learn_from_csv(data: CSVLearningData) -> Dict[str, Any]:
             status_code=400,
             detail=f"Target column '{data.target_column}' not found. Available: {df.columns.tolist()}",
         )
+
+    try:
+        incoming_unit = (
+            normalize_resistance_unit(csv_parse_report.get("resistance_unit"))
+            if csv_parse_report.get("parser") == "pcb_resistance_csv"
+            else frame_resistance_unit(df)
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    try:
+        training_resistance_unit(clf, incoming_unit, merge_history=data.merge_history)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
 
     profile = data.training_profile.strip().lower()
     if profile not in {"raw", "plateau"}:
@@ -346,7 +383,7 @@ async def learn_from_csv(data: CSVLearningData) -> Dict[str, Any]:
         new_classes = set(y.unique()) - existing_classes
         mismatch = False
 
-        ok, accuracy, fresh = retrain_with_all_data(
+        ok, accuracy, fresh = _retrain_with_units(
             clf, X, y,
             use_augmentation=data.use_augmentation,
             n_augmentations=data.n_augmentations,
@@ -354,6 +391,7 @@ async def learn_from_csv(data: CSVLearningData) -> Dict[str, Any]:
             classifier_backend=backend,
             baseline_mode=baseline_mode,
             snv=data.snv,
+            acquisition_resistance_unit=incoming_unit,
         )
         if not ok or fresh is None:
             raise HTTPException(status_code=500, detail="Training failed")

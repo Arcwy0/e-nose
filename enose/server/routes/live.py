@@ -18,13 +18,17 @@ without a second round-trip per sample.
 
 from __future__ import annotations
 
+import json
+import math
+import time
 from typing import Any, Dict, List, Optional
 
 import numpy as np
 from fastapi import APIRouter, HTTPException, Query
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 
 from enose.config import ALL_SENSORS
+from enose.utils.acquisition import prediction_unit_error
 
 from .. import state
 from ..live_buffer import buffer
@@ -63,6 +67,39 @@ class LivePushPayload(BaseModel):
     classify: bool = False             # ask server to also run /smell/classify
     session_id: Optional[str] = None   # groups samples from the same run
     pose: Optional[LivePose] = None    # robot pose at sample time (Phase 0+)
+    acquisition: Optional[Dict[str, Any]] = None  # diagnostics, never classifier inputs
+
+    @field_validator("acquisition")
+    @classmethod
+    def validate_acquisition(cls, value):
+        if value is None:
+            return None
+        # Bound the optional extension and discard unknown keys. JSON values
+        # only: no nested arbitrary objects or non-finite sensor diagnostics.
+        if len(json.dumps(value, allow_nan=False)) > 8192:
+            raise ValueError("acquisition metadata exceeds 8192 bytes")
+        allowed = {
+            "backend", "resistance_unit", "environment_source", "frame_index",
+            "received_at", "sample_age_seconds", "device_id", "firmware_version",
+            "temp0_c", "temp1_c", "duty_permille", "flags", "dropped_frames", "source_timestamp",
+            "valid", "config", "segment_id", "stale_after_seconds",
+        }
+        clean = {k: v for k, v in value.items() if k in allowed}
+        for key, item in clean.items():
+            if key == "config":
+                if not isinstance(item, dict) or len(item) > 32:
+                    raise ValueError("acquisition config must contain at most 32 fields")
+                # Short arrays (e.g. 17 per-channel gains) are useful, but
+                # deeply nested structures do not belong in each live frame.
+                for config_value in item.values():
+                    parts = config_value if isinstance(config_value, list) else [config_value]
+                    if len(parts) > 32 or any(not isinstance(p, (str, int, float, bool, type(None))) for p in parts):
+                        raise ValueError("acquisition config values must be scalar or short scalar lists")
+            elif not isinstance(item, (str, int, float, bool, type(None))):
+                raise ValueError(f"acquisition {key} must be scalar")
+            if isinstance(item, str) and len(item) > 160:
+                raise ValueError(f"acquisition {key} exceeds 160 characters")
+        return clean
 
 
 def _run_classifier(sample: Dict[str, float]) -> Optional[Dict[str, Any]]:
@@ -106,6 +143,8 @@ async def push_sample(payload: LivePushPayload) -> Dict[str, Any]:
         if k in payload.sample:
             try:
                 clean[k] = float(payload.sample[k])
+                if not math.isfinite(clean[k]):
+                    raise HTTPException(status_code=400, detail=f"non-finite sensor {k}")
             except (TypeError, ValueError):
                 continue
 
@@ -118,14 +157,22 @@ async def push_sample(payload: LivePushPayload) -> Dict[str, Any]:
         entry["session_id"] = str(payload.session_id)
     if payload.pose is not None:
         entry["pose"] = payload.pose.model_dump()
+    if payload.acquisition is not None:
+        entry["acquisition"] = payload.acquisition
 
-    if payload.classify:
-        info = _run_classifier(clean)
-        if info:
-            entry.update(info)
+    if payload.classify and (payload.acquisition or {}).get("valid") is not False:
+        unit_error = prediction_unit_error(state.smell_classifier, payload.acquisition)
+        if unit_error:
+            entry["prediction_error"] = unit_error
+        else:
+            info = _run_classifier(clean)
+            if info:
+                entry.update(info)
 
     eid = buffer.push(entry)
-    return {"ok": True, "id": eid, "buffered": len(buffer)}
+    result = {"ok": True, "id": eid, "buffered": len(buffer)}
+    result.update({k: entry[k] for k in ("predicted", "confidence", "top3", "prediction_error") if k in entry})
+    return result
 
 
 @router.get("/recent")
@@ -141,6 +188,7 @@ async def recent(
         "last_id": last_id,
         "buffered": len(buffer),
         "capacity": buffer.capacity,
+        "server_time": time.time(),
     }
 
 

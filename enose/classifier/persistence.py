@@ -15,6 +15,8 @@ from typing import Any, Dict, Tuple
 import joblib
 import numpy as np
 
+from enose.utils.acquisition import model_resistance_unit, normalize_resistance_unit
+
 
 def build_save_payload(classifier) -> Dict[str, Any]:
     """Extract persistent state from a BalancedRFClassifier.
@@ -26,6 +28,7 @@ def build_save_payload(classifier) -> Dict[str, Any]:
     """
     return {
         "classifier_backend": str(getattr(classifier, "backend_name", "balanced_rf")),
+        "acquisition_resistance_unit_": model_resistance_unit(classifier),
         "model": classifier.model,
         "scaler_r": classifier.scaler_r,
         "classes_": classifier.classes_,
@@ -99,6 +102,7 @@ def save(classifier, out_dir: str = "trained_models") -> str:
         "n_features": len(classifier.ALL_SENSORS),
         "features": classifier.ALL_SENSORS,
         "classes": list(map(str, classifier.classes_)),
+        "resistance_unit": model_resistance_unit(classifier),
         "balanced_accuracy_last": (
             classifier.training_history["balanced_accuracy"][-1]
             if classifier.training_history["balanced_accuracy"]
@@ -115,6 +119,7 @@ def _load_legacy_estimator(payload, cls) -> "cls":
     """Payload is a raw sklearn estimator/pipeline — wrap it but skip internal scaling."""
     obj = cls()
     obj.is_fitted = True
+    obj.acquisition_resistance_unit_ = None
     obj.model = payload
     obj.classes_ = getattr(payload, "classes_", np.array([]))
     obj._legacy_pipeline = True
@@ -156,6 +161,7 @@ def load(path: str, cls) -> "cls":
     # Case B: dict container
     obj = cls()
     obj.is_fitted = True
+    obj.acquisition_resistance_unit_ = normalize_resistance_unit(payload.get("acquisition_resistance_unit_"))
     obj._legacy_pipeline = False
     obj._use_internal_scaler = True
 

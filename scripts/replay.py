@@ -69,6 +69,17 @@ def load_session(path: str) -> Dict[str, Any]:
         "session_label": str(_get("session_label", np.array("")).item() if _get("session_label") is not None else ""),
         "created_at": str(_get("created_at", np.array("")).item() if _get("created_at") is not None else ""),
     }
+    raw_acquisition = _get("acquisition_json")
+    session["acquisition"] = []
+    if raw_acquisition is not None:
+        for encoded in raw_acquisition.tolist():
+            metadata = json.loads(str(encoded))
+            if not isinstance(metadata, dict):
+                raise ValueError("Recorded acquisition metadata must be a JSON object")
+            session["acquisition"].append(metadata)
+        if session["samples"] is not None and len(session["acquisition"]) != len(session["samples"]):
+            raise ValueError("Recorded acquisition metadata does not match sample count")
+    npz.close()
     return session
 
 
@@ -174,8 +185,8 @@ def replay_session(
         n_total = min(n_total, limit)
 
     sensor_names = session["sensor_names"]
-    original_preds = [str(x) for x in (session["predictions"] or [])][:n_total]
-    original_confs = list(session["confidences"] or [])[:n_total]
+    original_preds = [str(x) for x in session["predictions"]][:n_total] if session["predictions"] is not None else []
+    original_confs = list(session["confidences"])[:n_total] if session["confidences"] is not None else []
 
     url = server_url.rstrip("/") + "/smell/classify"
     print(f"[replay] {n_total} samples → {url}")
@@ -184,6 +195,9 @@ def replay_session(
     if session["session_id"]:
         print(f"[replay] session_id    = {session['session_id']}")
     print(f"[replay] created_at    = {session['created_at']}")
+    if session["acquisition"]:
+        metadata = session["acquisition"][0]
+        print(f"[replay] acquisition   = {metadata.get('backend', '?')}, unit={metadata.get('resistance_unit', '?')} (already normalized)")
 
     period = (1.0 / rate_hz) if rate_hz and rate_hz > 0 else 0.0
 
@@ -195,6 +209,11 @@ def replay_session(
     for i in range(n_total):
         t_req = time.monotonic()
         payload = _row_to_payload(samples[i], sensor_names)
+        if session["acquisition"]:
+            # Samples are already normalized. Forward original provenance and
+            # units for compatibility checks, not as classifier features. This
+            # replay is historical and does not claim current sensor freshness.
+            payload["acquisition"] = session["acquisition"][i]
         try:
             r = requests.post(url, json=payload, timeout=timeout)
             r.raise_for_status()

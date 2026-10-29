@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import time
+import json
 from typing import Any, Dict, List, Optional
 
 import numpy as np
@@ -30,8 +31,27 @@ def _recent_live_frame(window: float, session_id: Optional[str]) -> pd.DataFrame
         items = [item for item in items if item.get("session_id") == session_id]
     if not items:
         raise HTTPException(status_code=409, detail="live sensor buffer is empty")
+    if time.time() - max(float(item.get("t", 0.0)) for item in items) > 5.0:
+        raise HTTPException(status_code=409, detail="live sensor data is stale; reconnect or resume acquisition")
     newest = max(float(item.get("t", 0.0)) for item in items)
     items = [item for item in items if float(item.get("t", 0.0)) >= newest - window]
+    from enose.utils.acquisition import prediction_unit_error
+    configurations = set()
+    for item in items:
+        acquisition = item.get("acquisition")
+        if not acquisition:
+            configurations.add("unknown-legacy-acquisition")
+            continue  # Backward-compatible legacy live publishers.
+        if acquisition.get("valid") is False:
+            raise HTTPException(status_code=409, detail="live window contains invalid acquisition data")
+        unit_error = prediction_unit_error(state.smell_classifier, acquisition)
+        if unit_error:
+            raise HTTPException(status_code=409, detail=unit_error)
+        configurations.add(json.dumps({key: acquisition.get(key) for key in (
+            "backend", "device_id", "resistance_unit", "segment_id", "config",
+        )}, sort_keys=True))
+    if len(configurations) > 1:
+        raise HTTPException(status_code=409, detail="live window spans acquisition configuration changes; wait for a fresh single-configuration window")
     records: List[Dict[str, Any]] = []
     for item in items:
         sample = dict(item.get("sample") or {})
@@ -170,7 +190,11 @@ async def classify_smell(sensor_data: SensorData) -> Dict[str, Any]:
     """
     clf = state.require_fitted_classifier()
     try:
-        data_dict = sensor_data.dict()
+        from enose.utils.acquisition import prediction_unit_error
+        unit_error = prediction_unit_error(clf, sensor_data.acquisition)
+        if unit_error:
+            raise HTTPException(status_code=409, detail=unit_error)
+        data_dict = sensor_data.model_dump(exclude={"acquisition"})
         # predict()/predict_proba() run process_sensor_data internally
         # (see BalancedRFClassifier._model_input). Pass the raw dict so we
         # don't scale + log1p twice and collapse everything near zero.

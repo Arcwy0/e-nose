@@ -20,6 +20,7 @@ Design goals:
         session_id   scalar str
         session_label scalar str
         created_at   scalar str — ISO-8601
+        acquisition_json (N,) str — optional device diagnostics, JSON (no pickle)
 
 Loader is in ``scripts/replay.py``.
 """
@@ -27,6 +28,8 @@ Loader is in ``scripts/replay.py``.
 from __future__ import annotations
 
 import datetime
+import copy
+import json
 import os
 import threading
 from typing import Dict, List, Optional
@@ -39,7 +42,7 @@ from enose.config import ALL_SENSORS
 class SessionRecorder:
     """Append-only in-memory recorder.
 
-    Plug into ``LivePublisher(on_sample=recorder.submit)`` (possibly via a
+    Plug into ``LivePublisher(on_complete=recorder.submit)`` (possibly via a
     tee — see :func:`tee_callbacks`) and call :meth:`save` when done.
     """
 
@@ -60,7 +63,7 @@ class SessionRecorder:
     def submit(self, entry: Dict) -> None:
         """Callback plugged into the publisher — stashes one frame."""
         with self._lock:
-            self._rows.append(entry)
+            self._rows.append(copy.deepcopy(entry))
 
     def __len__(self) -> int:
         with self._lock:
@@ -104,6 +107,12 @@ class SessionRecorder:
             dtype=np.float32,
         )
         labels = np.array([str(r.get("label") or "") for r in rows])
+        # Unicode JSON keeps device diagnostics out of the feature matrix and
+        # remains readable with allow_pickle=False (including older loaders).
+        acquisition_json = np.array([
+            json.dumps(r.get("acquisition") or {}, allow_nan=False, sort_keys=True)
+            for r in rows
+        ], dtype=str)
 
         np.savez(
             out,
@@ -114,6 +123,7 @@ class SessionRecorder:
             predictions=predictions,
             confidences=confidences,
             labels=labels,
+            acquisition_json=acquisition_json,
             session_id=np.array(self.session_id),
             session_label=np.array(self.session_label),
             created_at=np.array(self._created_at),
