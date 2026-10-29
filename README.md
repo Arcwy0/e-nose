@@ -13,7 +13,7 @@ A robotic olfaction system combining a **Florence-2** vision model with a **17-c
                    │ REST / JSON
 ┌──────────────────▼──────────────────────────────────┐
 │  Client  (laptop / robot)                           │
-│  ├── ENoseSensor   (e-nose UART; env optional)     │
+│  ├── PCB USB CDC / legacy UART (env optional)     │
 │  ├── WebcamHandler (OpenCV capture)                 │
 │  └── TrainingPipeline (interactive CLI)             │
 └─────────────────────────────────────────────────────┘
@@ -147,12 +147,26 @@ python scripts/run_client.py --offline --server http://localhost:8080
 ### 4 — Client (hardware)
 
 ```bash
-# Linux
-python scripts/run_client.py --port_enose /dev/ttyUSB0 --port_UART /dev/ttyUSB1 --server http://localhost:8080
+# New PCB (default backend): USB CDC, 250000 baud, calibrated ohms
+python scripts/run_client.py --port_enose /dev/ttyACM0 --server http://localhost:8080
 
-# Windows
-python scripts/run_client.py --port_enose COM3 --port_UART COM4 --server http://localhost:8080
+# Old board: retain ADC conversion, RLOW, and optional environmental UART
+python scripts/run_client.py --sensor-backend legacy --port_enose /dev/ttyUSB0 --port_UART /dev/ttyUSB1 --server http://localhost:8080
+
+# Real measurements from a desktop CSV, no physical sensor required
+python scripts/run_client.py --sensor-backend replay --sensor-csv /path/to/recording.csv --live --server http://localhost:8080
 ```
+
+The PCB/replay default unit is **ohm**. `--resistance-unit kohm` or `mohm`
+requests an explicit conversion; legacy `--rlow` scaling is unchanged. Do not
+guess the historical model's units. Verified units are persisted with new
+models; incompatible or unverified PCB/model units block prediction and
+historical merging instead of silently rescaling. Back up models/history before
+choosing replacement training. Unlabelled CSVs can be replayed but cannot train.
+
+See [PCB acquisition and replay](docs/PCB_ACQUISITION.md) for setup, metadata,
+UI diagnostics, limitations, and software-only validation. This feature requires
+the updated source; the previously published v3.2.2 wheel does not contain it.
 
 ### 5 — Remote clients (colleagues on the LAN or a private tunnel)
 

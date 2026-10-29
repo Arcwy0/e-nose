@@ -206,6 +206,13 @@ textarea{resize:vertical;font-family:monospace;font-size:.85rem}
       </div>
 
       <p id="train-profile-hint" class="hint">Stable mode uses one-minute medians from late, low-slope analyte plateaus and clean air immediately before each exposure. A Timestamp column is required.</p>
+      <label for="pcb-csv-unit">PCB CSV output resistance units</label>
+      <select id="pcb-csv-unit" style="width:auto">
+        <option value="ohm" selected>Ω (ohm)</option>
+        <option value="kohm">kΩ (kohm)</option>
+        <option value="mohm">MΩ (mohm)</option>
+      </select>
+      <p class="hint">Applies only to PCB <code>rs_ch0_ohm…rs_ch16_ohm</code> columns; ordinary R1–R17 values are unchanged. Match the acquisition/model units. Raw ADC columns are rejected. A smell-label column is required; unlabeled PCB recordings cannot train a classifier.</p>
 
       <label style="display:flex;align-items:center;gap:.5rem;font-size:.85rem;cursor:pointer;margin-bottom:.5rem">
         <input type="checkbox" id="uaug" style="width:auto"> Use synthetic data augmentation (experimental)
@@ -267,14 +274,18 @@ textarea{resize:vertical;font-family:monospace;font-size:.85rem}
       <div id="lv-action"></div>
 
       <div class="lvmeta">
-        <div class="lvstat"><div class="k">Status</div><div class="v"><span id="lv-dot" class="lvdot off"></span><span id="lv-state">idle</span></div></div>
+        <div class="lvstat"><div class="k">Browser polling</div><div class="v"><span id="lv-dot" class="lvdot off"></span><span id="lv-state">idle</span></div></div>
+        <div class="lvstat"><div class="k">Acquisition / sample age</div><div class="v" id="lv-fresh">no samples</div></div>
         <div class="lvstat"><div class="k">Samples (buffer)</div><div class="v" id="lv-n">&mdash;</div></div>
         <div class="lvstat"><div class="k">Shown</div><div class="v" id="lv-shown">0</div></div>
         <div class="lvstat"><div class="k">Last label</div><div class="v" id="lv-last">&mdash;</div></div>
         <div class="lvstat"><div class="k">Last conf.</div><div class="v" id="lv-conf">&mdash;</div></div>
       </div>
+      <p id="lv-device" class="hint">Acquisition metadata not available.</p>
+      <p id="lv-env-source" class="hint"></p>
+      <p id="lv-prediction-error" class="hint" style="color:var(--err)"></p>
 
-      <div class="slbl">&#128309; Resistance sensors (R1&ndash;R17)</div>
+      <div class="slbl">&#128309; Resistance sensors (R1&ndash;R17) <span id="lv-unit"></span></div>
       <svg id="lv-svgR" class="lvchart" viewBox="0 0 800 220" preserveAspectRatio="none"></svg>
 
       <div class="slbl">&#128994; Environmental sensors (T / H / CO2 / H2S / CH2O)</div>
@@ -482,11 +493,12 @@ async function trainCsv(){
   const backend=document.getElementById('tbackend').value;
   const baselineMode=document.getElementById('tbmode').value;
   const snv=document.getElementById('tsnv').checked;
+  const resistanceUnit=document.getElementById('pcb-csv-unit').value;
   if(!mh&&!confirm('Replace the current model and training history with ONLY this CSV?'))return;
   msg('tr','info','<span class="spin"></span> Training&hellip; this may take a minute.');
   try{
     const r=await fetch('/smell/learn_from_csv',{method:'POST',headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({csv_data:csv,target_column:tc,use_augmentation:ua,n_augmentations:na,lowercase_labels:lc,noise_std:0.0015,merge_history:mh,training_profile:profile,classifier_backend:backend,baseline_mode:baselineMode,snv:snv})});
+      body:JSON.stringify({csv_data:csv,target_column:tc,use_augmentation:ua,n_augmentations:na,lowercase_labels:lc,noise_std:0.0015,merge_history:mh,training_profile:profile,classifier_backend:backend,baseline_mode:baselineMode,snv:snv,resistance_unit:resistanceUnit})});
     const d=await r.json();
     if(!r.ok){msg('tr','err',d.detail||JSON.stringify(d));return;}
     const cls=(d.classes||[]).join(', ')||'(none)';
@@ -562,6 +574,7 @@ async function loadInfo(){
     const factsHtml=`<div class="lvmeta" style="margin-top:.75rem">
       <div class="lvstat"><div class="k">Known classes</div><div class="v">${cls.length}</div></div>
       <div class="lvstat"><div class="k">Features</div><div class="v">${nFeat}</div></div>
+      <div class="lvstat"><div class="k">Resistance unit</div><div class="v">${['ohm','kohm','mohm'].includes(d.resistance_unit)?d.resistance_unit:'unverified'}</div></div>
       <div class="lvstat"><div class="k">Training samples</div><div class="v">${total}</div></div>
       <div class="lvstat"><div class="k">Training runs</div><div class="v">${h.accuracy?.length||0}</div></div>
       <div class="lvstat"><div class="k">Last accuracy</div><div class="v">${acc!=null?(acc*100).toFixed(1)+'%':'—'}</div></div>
@@ -662,7 +675,7 @@ async function loadInfo(){
 // Polling-based (not WebSocket) because tuna.am is a plain TCP tunnel to
 // FastAPI/uvicorn. /sensor/live/recent?since=<id> is incremental so the
 // wire cost stays bounded no matter how long the tab is left open.
-const LV={on:false,timer:null,lastId:0,rows:[],err:0};
+const LV={on:false,timer:null,lastId:-1,rows:[],err:0,serverOffset:0};
 const R_PALETTE=['#1d4ed8','#2563eb','#3b82f6','#60a5fa','#7c3aed','#9333ea','#a855f7','#c084fc',
                  '#0891b2','#06b6d4','#22d3ee','#10b981','#059669','#65a30d','#84cc16','#eab308','#f59e0b'];
 const E_PALETTE={T:'#dc2626',H:'#2563eb',CO2:'#16a34a',H2S:'#a855f7',CH2O:'#f59e0b'};
@@ -679,7 +692,7 @@ function lvToggle(){
   const st=document.getElementById('lv-state');
   if(LV.on){
     btn.textContent='\u25A0 Stop polling';btn.classList.remove('bp');btn.classList.add('bs');
-    dot.className='lvdot on';st.textContent='streaming';
+    dot.className='lvdot on';st.textContent='polling';
     lvPollOnce();LV.timer=setInterval(lvPollOnce,1000);
   }else{
     btn.textContent='\u25B6 Start polling';btn.classList.remove('bs');btn.classList.add('bp');
@@ -692,6 +705,7 @@ async function lvPollOnce(){
     const r=await fetch(`/sensor/live/recent?since=${LV.lastId}&limit=500`,{cache:'no-store'});
     if(!r.ok)throw new Error('HTTP '+r.status);
     const d=await r.json();
+    if(Number.isFinite(d.server_time))LV.serverOffset=Date.now()/1000-d.server_time;
     const items=d.items||[];
     if(items.length){
       // Rebuild from scratch if the server was cleared (last_id regressed).
@@ -699,7 +713,7 @@ async function lvPollOnce(){
       LV.rows=LV.rows.concat(items);
       // Keep memory bounded even when the tab stays open for hours.
       if(LV.rows.length>2000)LV.rows.splice(0,LV.rows.length-2000);
-      LV.lastId=d.last_id||LV.lastId;
+      LV.lastId=d.last_id??LV.lastId;
     }
     document.getElementById('lv-n').textContent=(d.buffered||0)+' / '+(d.capacity||'?');
     LV.err=0;
@@ -713,7 +727,7 @@ async function lvPollOnce(){
 async function lvClear(){
   try{
     const r=await fetch('/sensor/live/clear',{method:'DELETE'});
-    if(r.ok){LV.rows=[];LV.lastId=0;lvRedraw();
+    if(r.ok){LV.rows=[];LV.lastId=-1;lvRedraw();
       document.getElementById('lv-msg').innerHTML='<div class="msg ok">Buffer cleared.</div>';
       setTimeout(()=>{document.getElementById('lv-msg').innerHTML='';},2000);}
   }catch(e){}
@@ -781,10 +795,31 @@ function lvRedraw(){
   document.getElementById('lv-shown').textContent=rows.length;
   if(rows.length){
     const last=rows[rows.length-1];
+    const a=last.acquisition||{};
+    const age=Math.max(0,Date.now()/1000-LV.serverOffset-last.t)+Math.max(0,Number(a.sample_age_seconds)||0);
+    const staleAfter=Math.max(0.1,Number(a.stale_after_seconds)||3);
+    document.getElementById('lv-fresh').textContent=(a.valid===false?'INVALID':age>staleAfter?'STALE':'fresh')+' / '+age.toFixed(1)+' s';
+    const value=(v)=>v==null?'unknown':String(v);
+    document.getElementById('lv-unit').textContent='['+value(a.resistance_unit||'legacy / unspecified')+']';
+    document.getElementById('lv-device').textContent=[
+      'Backend: '+value(a.backend), 'Board: '+value(a.device_id), 'Firmware: '+value(a.firmware_version),
+      'Frame: '+value(a.frame_index), 'Dropped frames: '+value(a.dropped_frames),
+      'Sensor temperatures (not ambient): '+value(a.temp0_c)+' / '+value(a.temp1_c)+' °C',
+      'Heater duty: '+value(a.duty_permille)+' ‰', 'Status/fault flags: '+value(a.flags)
+    ].join(' | ');
+    document.getElementById('lv-env-source').textContent=a.environment_source==='defaults'
+      ?'Environmental sensors: UNMEASURED. Compatibility defaults are excluded from the chart.'
+      :'Environmental source: '+value(a.environment_source);
+    document.getElementById('lv-prediction-error').textContent=last.prediction_error||'';
     document.getElementById('lv-last').textContent=last.predicted||last.label||'\u2014';
     document.getElementById('lv-conf').textContent=
       (last.confidence!=null?(last.confidence*100).toFixed(1)+'%':'\u2014');
   }else{
+    document.getElementById('lv-fresh').textContent='no samples';
+    document.getElementById('lv-device').textContent='Acquisition metadata not available.';
+    document.getElementById('lv-env-source').textContent='';
+    document.getElementById('lv-prediction-error').textContent='';
+    document.getElementById('lv-unit').textContent='';
     document.getElementById('lv-last').textContent='\u2014';
     document.getElementById('lv-conf').textContent='\u2014';
   }
@@ -792,6 +827,15 @@ function lvRedraw(){
   lvDrawPanel('lv-svgR',rows,RES,R_PALETTE,{normPerTrace:norm,width:800,height:220});
   lvDrawPanel('lv-svgE',rows,ENV,ENV.map(n=>E_PALETTE[n]),{normPerTrace:true,width:800,height:180});
   lvDrawConf('lv-svgC',rows);
+}
+
+function lvBreakBefore(rows,index){
+  if(index===0)return true;
+  const previous=rows[index-1], current=rows[index];
+  const a=previous.acquisition||{}, b=current.acquisition||{};
+  const changed=['backend','device_id','resistance_unit','segment_id','config'].some(k=>JSON.stringify(a[k])!==JSON.stringify(b[k]));
+  const reset=a.frame_index!=null&&b.frame_index!=null&&b.frame_index<=a.frame_index;
+  return changed||reset||Number(b.dropped_frames||0)>Number(a.dropped_frames||0)||current.t-previous.t>3;
 }
 
 function lvDrawPanel(id,rows,names,palette,opt){
@@ -805,7 +849,11 @@ function lvDrawPanel(id,rows,names,palette,opt){
   }
   const t0=rows[0].t,t1=rows[rows.length-1].t||t0+1,dt=Math.max(t1-t0,1e-6);
   // Pre-extract per-sensor series.
-  const series=names.map(n=>rows.map(r=>{const v=(r.sample||{})[n];return v==null||isNaN(v)?null:+v;}));
+  const series=names.map(n=>rows.map(r=>{
+    const a=r.acquisition||{};
+    if(a.valid===false||(ENV.includes(n)&&a.environment_source==='defaults'))return null;
+    const v=(r.sample||{})[n];return v==null||!Number.isFinite(+v)?null:+v;
+  }));
   let parts=[];
   // Axes.
   parts.push(`<rect x="${PAD_L}" y="${PAD_T}" width="${plotW}" height="${plotH}" fill="#fafafa" stroke="#e2e8f0"/>`);
@@ -826,6 +874,7 @@ function lvDrawPanel(id,rows,names,palette,opt){
     const rng=mx-mn||1;
     let path='',first=true;
     rows.forEach((r,k)=>{
+      if(lvBreakBefore(rows,k))first=true;
       const v=s[k];if(v==null){first=true;return;}
       const x=PAD_L+((r.t-t0)/dt)*plotW;
       const y=PAD_T+plotH-((v-mn)/rng)*plotH;
@@ -867,7 +916,8 @@ function lvDrawConf(id,rows){
   function colorFor(c){if(!c)return '#94a3b8';if(!(c in classColor))classColor[c]=basePal[(palIdx++)%basePal.length];return classColor[c];}
   // Draw as coloured dots + thin connecting line.
   let path='',first=true;
-  confd.forEach(r=>{
+  confd.forEach((r,k)=>{
+    if(lvBreakBefore(confd,k)||(r.acquisition||{}).valid===false)first=true;
     const x=PAD_L+((r.t-t0)/dt)*plotW;
     const y=PAD_T+plotH-Math.max(0,Math.min(1,r.confidence))*plotH;
     path+=(first?'M':'L')+x.toFixed(1)+' '+y.toFixed(1)+' ';

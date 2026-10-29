@@ -1,5 +1,12 @@
 # enose/client — Interactive Client
 
+The package CLI defaults to USB CDC PCB acquisition. Select
+`--sensor-backend legacy` for the original UART/ADC board, or `replay` with
+`--sensor-csv PATH` for real-data playback without hardware. See
+[PCB acquisition](../../docs/PCB_ACQUISITION.md) for units, optional
+environmentals, status visualization, and compatibility limits. Examples below
+describing raw ADC/RLOW apply to the legacy backend.
+
 ## Quickstart
 
 ```bash

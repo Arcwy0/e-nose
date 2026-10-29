@@ -134,6 +134,8 @@ temp_capture.png
 docker-compose.override.yml
 
 # ── Misc ─────────────────────────────────────────────────────────────────────
+# Supplier field distribution contains third-party binaries and private logs.
+/E-NOSE-*-field-*/
 *.bak
 *.tmp
 *.old
