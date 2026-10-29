@@ -98,6 +98,18 @@ def transform_sensor_values(values: List[float], rlow: float = RLOW) -> List[flo
 class ENoseSensor:
     """Sensor handler with threaded recording and optional environment input."""
 
+    backend = "legacy"
+
+    def get_acquisition_metadata(self) -> dict:
+        return {
+            "backend": "simulation" if self.offline_mode else "legacy",
+            "resistance_unit": "legacy/RLOW", "valid": True,
+            "environment_source": "simulation" if self.offline_mode else (
+                "uart" if self.port and self.port[1] else "defaults"
+            ),
+            "config": {"rlow": self.rlow},
+        }
+
     def __init__(
         self,
         port: Optional[Tuple[str, str]] = None,

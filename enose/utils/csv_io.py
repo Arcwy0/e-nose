@@ -30,6 +30,7 @@ def _as_float(value: str) -> Optional[float]:
 def parse_uploaded_enose_csv(
     text: str,
     label_column: str = "Gas name",
+    pcb_resistance_unit: str = "ohm",
 ) -> tuple[pd.DataFrame, dict]:
     """Parse a normal CSV or recover the recorder's variable-width format.
 
@@ -49,6 +50,9 @@ def parse_uploaded_enose_csv(
     variable_width = canonical_prefix and any(not name.strip() for name in header)
     if not variable_width:
         frame = pd.read_csv(StringIO(text), low_memory=False)
+        if any(str(name).startswith(("rs_ch", "raw_ch")) for name in frame.columns):
+            from .pcb_csv import normalize_pcb_recording
+            return normalize_pcb_recording(frame, pcb_resistance_unit)
         return frame, {
             "parser": "standard",
             "recovered_rows": 0,
@@ -172,6 +176,7 @@ def load_training_csv(candidates: Iterable[str]) -> Optional[pd.DataFrame]:
 _GROUP_COLUMNS_PASSTHROUGH = (
     "segment_id", "window_idx", "session_id", "exposure_id",
     "recording_id", "source", "source_file",
+    "resistance_unit",
 )
 
 

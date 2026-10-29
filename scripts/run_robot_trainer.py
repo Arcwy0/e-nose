@@ -107,7 +107,11 @@ def _build_ros2_backend(rows, args):
 
     server_api = ServerAPI(args.server)
     vision = HttpVisionClient(server_api, _capture)
-    sensor = ENoseSensor(port=args.port_pair, offline_mode=args.offline_sensor)
+    from enose.client.pcb_replay import create_sensor
+    sensor = create_sensor(
+        backend=args.sensor_backend, port=args.port_pair, offline=args.offline_sensor,
+        baud_rate_enose=args.baud_enose, resistance_unit=args.resistance_unit,
+    )
     return motion, localizer, pump, vision, sensor
 
 
@@ -140,6 +144,9 @@ def main(argv: List[str] | None = None) -> int:
     # Pass-through for the real ENoseSensor on the Jetson.
     ap.add_argument("--port-pair", default=None,
                     help="(ros2) e-nose serial ports as 'enose,uart' (default: auto-detect).")
+    ap.add_argument("--sensor-backend", choices=["pcb", "legacy"], default="pcb")
+    ap.add_argument("--baud_enose", type=int, default=None)
+    ap.add_argument("--resistance-unit", choices=["ohm", "kohm", "mohm"], default="ohm")
     ap.add_argument("--offline-sensor", action="store_true",
                     help="(ros2) Force ENoseSensor offline_mode even on the robot — debug only.")
     args = ap.parse_args(argv)

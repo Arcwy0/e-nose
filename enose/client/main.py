@@ -17,6 +17,7 @@ from enose.config import (
 from .api import ServerAPI
 from .pipeline import TrainingPipeline
 from .sensors import ENoseSensor
+from .pcb_replay import create_sensor
 from .webcam import WebcamHandler
 
 
@@ -33,7 +34,7 @@ MAIN MENU
 7. Generate visualizations + analysis
 8. Live sensor stream (plot + push to server)
 9. Replay a recorded session
-10. Set RLOW calibration
+10. Set RLOW calibration (legacy only)
 0. Exit
 ================================================================================
 """
@@ -43,6 +44,13 @@ def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description="E-Nose vision-smell training client")
     p.add_argument("--server", default=DEFAULT_SERVER_URL, help="Server URL")
     p.add_argument("--port_enose", help="E-nose serial port")
+    p.add_argument("--sensor-backend", choices=["pcb", "legacy", "replay"], default="pcb",
+                   help="Acquisition backend (default: new USB CDC PCB)")
+    p.add_argument("--resistance-unit", choices=["ohm", "kohm", "mohm"], default="ohm",
+                   help="PCB/replay output units; legacy RLOW scaling is unchanged")
+    p.add_argument("--sensor-csv", help="Resistance-mode desktop CSV for replay; never infers smell labels")
+    p.add_argument("--replay-speed", type=float, default=1.0,
+                   help="CSV time multiplier (0 = one row per read without timing)")
     p.add_argument(
         "--port_UART",
         help="Optional environmental UART; omit to use T/H/CO2/H2S/CH2O defaults",
@@ -50,7 +58,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--camera", type=int, default=0, help="Camera index")
     p.add_argument("--time", type=int, default=DEFAULT_RECORDING_TIME, help="Recording seconds")
     p.add_argument("--samples", type=int, default=DEFAULT_TARGET_SAMPLES, help="Target samples")
-    p.add_argument("--baud_enose", type=int, default=DEFAULT_BAUD_RATE)
+    p.add_argument("--baud_enose", type=int, default=None,
+                   help="Override backend baud (PCB 250000, legacy 9600)")
     p.add_argument("--baud_UART", type=int, default=DEFAULT_BAUD_RATE)
     p.add_argument("--rlow", type=float, default=RLOW,
                    help="Load resistance for ADC conversion (default: ENOSE_RLOW or 1.0)")
@@ -117,6 +126,9 @@ def _launch_replay(args) -> None:
 
 def _change_rlow(sensor: ENoseSensor) -> None:
     """Menu 10 — change calibration without restarting the client."""
+    if getattr(sensor, "backend", "legacy") != "legacy":
+        print("RLOW is legacy-only. PCB resistance is converted and calibrated in firmware.")
+        return
     raw = input(f"New RLOW (current {sensor.rlow:g}, > 0; blank to cancel): ").strip()
     if not raw:
         print("Unchanged.")
@@ -131,7 +143,7 @@ def _change_rlow(sensor: ENoseSensor) -> None:
 
 def main() -> None:
     args = build_parser().parse_args()
-    mode = "OFFLINE" if args.offline else "HARDWARE"
+    mode = "OFFLINE" if args.offline else args.sensor_backend.upper()
 
     print("=" * 80)
     print(f"E-NOSE VISION-SMELL CLIENT — 22 FEATURES ({mode})")
@@ -141,11 +153,13 @@ def main() -> None:
     webcam = WebcamHandler(args.camera)
     port_tuple = (args.port_enose, args.port_UART) if (args.port_enose or args.port_UART) else None
     try:
-        sensor = ENoseSensor(
-            port_tuple, args.baud_enose, args.baud_UART, args.offline, rlow=args.rlow
+        sensor = create_sensor(
+            args.sensor_backend, port_tuple, args.baud_enose, args.baud_UART,
+            offline=args.offline, rlow=args.rlow, resistance_unit=args.resistance_unit,
+            csv_path=args.sensor_csv, replay_speed=args.replay_speed,
         )
     except ValueError as exc:
-        print(f"Invalid RLOW: {exc}")
+        print(f"Invalid sensor configuration: {exc}")
         return
 
     print("Testing server connection…")
@@ -189,7 +203,9 @@ def main() -> None:
     try:
         while True:
             print(MENU)
-            print(f"Recording: {args.samples} samples in {args.time}s ({mode}); RLOW={sensor.rlow:g}")
+            calibration = (f"RLOW={sensor.rlow:g}" if sensor.backend == "legacy"
+                           else f"resistance unit={sensor.resistance_unit}; firmware conversion")
+            print(f"Recording: {args.samples} samples in {args.time}s ({mode}); {calibration}")
             choice = input("Select (0-10): ").strip()
             if choice == "1":
                 pipeline.run_training_cycle()
